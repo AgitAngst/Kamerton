@@ -37,6 +37,7 @@ use crate::texts::T;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_WHEEL: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
+const WM_OPEN: u32 = WM_APP + 4;
 const ICON_ID: u32 = 1;
 /// Выбор значка с клавиатуры (Win+B, стрелки, Enter).
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
@@ -107,6 +108,13 @@ pub fn refresh() {
             let _ = PostMessageW(Some(sys::hwnd(h)), WM_REFRESH, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// Просьба из канала для Antresol: открыть окно микшера у значка, как по щелчку. Само открытие делает
+/// поток трея; `false` — трей ещё не готов.
+pub fn open_flyout() -> bool {
+    let h = TRAY_HWND.load(Ordering::SeqCst);
+    h != 0 && unsafe { PostMessageW(Some(sys::hwnd(h)), WM_OPEN, WPARAM(0), LPARAM(0)) }.is_ok()
 }
 
 /// Запустить поток трея.
@@ -429,6 +437,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_WHEEL => {
                 let _ = ctx.control.adjust_default(wheel_step(wparam.0 as u16 as i16));
+                LRESULT(0)
+            }
+            WM_OPEN => {
+                if let Some(anchor) = icon_rect(hwnd) {
+                    ctx.shared.show(anchor);
+                }
                 LRESULT(0)
             }
             WM_REFRESH => {

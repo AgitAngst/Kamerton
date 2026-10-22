@@ -9,6 +9,7 @@ mod audio;
 mod d3d;
 mod flyout;
 mod icons;
+mod ipc;
 mod placement;
 mod shell;
 mod snap;
@@ -113,6 +114,7 @@ fn run_tray() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             let shared = std::sync::Arc::new(flyout::Shared::new(ctx.clone(), hwnd));
             tray::start(audio.control(), shared.clone());
+            ipc::start(audio.control(), tray::open_flyout);
             let want_h = flyout::content_height(&snapshot);
             Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, want_h, shared)) as Box<dyn shell::Content>)
         }),

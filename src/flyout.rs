@@ -118,6 +118,13 @@ impl Shared {
         }
     }
 
+    /// Просьба извне (канал Antresol): закрыто — открыть у значка, как щелчком; открыто — оставить.
+    pub fn show(&self, anchor: PxRect) {
+        if self.state.load(Ordering::SeqCst) == HIDDEN {
+            self.open(anchor, true);
+        }
+    }
+
     /// Открыть окно у `anchor`. Спрятанному окну Windows не шлёт WM_PAINT, поэтому сначала показать его
     /// под плащом (невидимым, без фокуса), потом попросить кадр.
     pub fn open(&self, anchor: PxRect, by_click: bool) {

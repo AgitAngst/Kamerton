@@ -1,0 +1,55 @@
+schema: spec-driven
+
+context: |
+  Language: Russian
+  All artifacts must be written in Russian.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Project: Kamerton, a tray volume mixer for Windows 10/11 (an EarTrumpet alternative), written in
+  Rust on egui and the Anvil kit (anvil-ui, tag kit-v*). A tray icon opens a flyout with per-app
+  volume, peak meters and mute; apps can be moved between playback devices; hotkeys and profiles.
+  Goals over EarTrumpet: low memory and CPU without leaks, correct flyout placement, no focus
+  stealing, robust session tracking. Parts (planned): src/audio/ (Core Audio: devices, sessions,
+  volume, meters, events), src/audio/policy.rs (undocumented IPolicyConfig and
+  IAudioPolicyConfigFactory, isolated so that a broken API disables only its feature),
+  src/tray.rs, src/flyout.rs, src/mixer.rs, src/hotkeys.rs, src/profiles.rs, src/config.rs
+  (files in %APPDATA%\Kamerton). Kamerton is self-contained: it does not read or copy code
+  from the owner's other projects.
+  Where the project stands and how to work: HANDOFF.md; plan and stages: SPEC.md;
+  docs of what exists now: docs/README.md; UI rules: docs/ui-guideline.md.
+  Owner rules every artifact must respect:
+  - every UI in the light AND the dark theme and in Russian AND English;
+  - everything printed to a console or a log is in English; code comments are in Russian;
+  - no new dependencies or downloads without the owner's explicit permission;
+  - releases, tags, CI runs and pushes only on the owner's command;
+  - the version grows with the plan: a stage - the second digit +1 from the CURRENT version
+    (after 0.9.x comes 1.0.0), a fix inside a stage - the third; the fourth number is the
+    build = commit count;
+  - builds, target and temp files only on disk E:, never D:;
+  - motion follows anvil-ui motion (docs/MOTION.md in Anvil) and the Windows "show animations" flag;
+  - live checks never change the user's audio settings (default device, app routing, volume)
+    without the owner's command, and restore what they touched;
+  - tasks include their tests and the doc updates (docs/, HANDOFF.md, SPEC.md) the change
+    needs; nothing is marked verified live without the owner's words.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

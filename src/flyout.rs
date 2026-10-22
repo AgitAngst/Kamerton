@@ -15,7 +15,8 @@ use eframe::egui::{
     StrokeKind, TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
 };
 
-use crate::audio::{App, AppKey, Audio, Control, Device, Flow, Snapshot, Target, model};
+use crate::audio::{App, AppKey, Audio, Control, Device, Flow, Roles, Snapshot, Target, model};
+use crate::config::Settings;
 use crate::icons;
 use crate::placement::{self, Edge, Rect as PxRect};
 use crate::sys;
@@ -30,6 +31,10 @@ pub const APP_ROW: f32 = 44.0;
 pub const EMPTY_ROW: f32 = 30.0;
 /// Между блоками устройств: отступ, линия, отступ.
 pub const SECTION_GAP: f32 = 6.0 * 2.0 + 1.0;
+/// Подпись «ЗАПИСЬ» над устройствами записи.
+pub const LABEL_ROW: f32 = 28.0;
+/// Низ окна: отступ и кнопка «Все устройства» / «Только основное».
+pub const FOOTER: f32 = 6.0 + 30.0;
 const NUMBER_W: f32 = 34.0;
 const BUTTON: f32 = 30.0;
 const ICON: f32 = 24.0;
@@ -45,24 +50,80 @@ const HIDDEN: u8 = 0;
 const OPENING: u8 = 1;
 const OPEN: u8 = 2;
 
-/// Устройства вывода: по умолчанию — первым.
-pub fn outputs(s: &Snapshot) -> Vec<&Device> {
-    let mut v: Vec<&Device> = s.devices.iter().filter(|d| d.flow == Flow::Render).collect();
+/// Что стоит в окне сверху вниз.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Block<'a> {
+    Device(&'a Device),
+    /// Подпись «ЗАПИСЬ» перед устройствами записи.
+    RecordingLabel,
+}
+
+/// Устройства одного направления: по умолчанию — первым.
+fn of_flow(s: &Snapshot, flow: Flow) -> Vec<&Device> {
+    let mut v: Vec<&Device> = s.devices.iter().filter(|d| d.flow == flow).collect();
     v.sort_by_key(|d| !d.is_default);
     v
 }
 
-/// Высота содержимого окна: от неё место окна считается ещё до первого кадра.
-pub fn content_height(s: &Snapshot) -> f32 {
-    let devs = outputs(s);
-    if devs.is_empty() {
-        return 2.0 * PAD_Y + EMPTY_ROW;
+/// Устройства вывода: по умолчанию — первым.
+pub fn outputs(s: &Snapshot) -> Vec<&Device> {
+    of_flow(s, Flow::Render)
+}
+
+/// Блоки окна. Свёрнуто — только устройство вывода по умолчанию; развёрнуто — все устройства вывода,
+/// затем подпись и устройства записи.
+pub fn blocks(s: &Snapshot, expanded: bool) -> Vec<Block<'_>> {
+    let outs = outputs(s);
+    if !expanded {
+        return outs.into_iter().take(1).map(Block::Device).collect();
     }
-    let blocks: f32 = devs
-        .iter()
-        .map(|d| DEVICE_ROW + if d.apps.is_empty() { EMPTY_ROW } else { d.apps.len() as f32 * APP_ROW })
-        .sum();
-    2.0 * PAD_Y + blocks + (devs.len() - 1) as f32 * SECTION_GAP
+    let mut v: Vec<Block> = outs.into_iter().map(Block::Device).collect();
+    let ins = of_flow(s, Flow::Capture);
+    if !ins.is_empty() {
+        v.push(Block::RecordingLabel);
+        v.extend(ins.into_iter().map(Block::Device));
+    }
+    v
+}
+
+/// Программы устройства в окне: у записи — без «Системных звуков».
+fn shown_apps(d: &Device) -> Vec<&App> {
+    d.apps.iter().filter(|a| !(d.flow == Flow::Capture && a.system)).collect()
+}
+
+/// Высота содержимого окна: от неё место окна считается ещё до кадра.
+pub fn content_height(s: &Snapshot, expanded: bool) -> f32 {
+    let list = blocks(s, expanded);
+    if list.is_empty() {
+        return 2.0 * PAD_Y + EMPTY_ROW + FOOTER;
+    }
+    let mut h = 0.0;
+    let mut prev_device = false;
+    for b in &list {
+        match b {
+            Block::Device(d) => {
+                if prev_device {
+                    h += SECTION_GAP;
+                }
+                let n = shown_apps(d).len();
+                h += DEVICE_ROW + if n == 0 { EMPTY_ROW } else { n as f32 * APP_ROW };
+                prev_device = true;
+            }
+            Block::RecordingLabel => {
+                h += SECTION_GAP + LABEL_ROW;
+                prev_device = false;
+            }
+        }
+    }
+    2.0 * PAD_Y + h + FOOTER
+}
+
+/// Программу тянут на другое устройство.
+#[derive(Debug, Clone)]
+struct DragApp {
+    key: AppKey,
+    name: String,
+    flow: Flow,
 }
 
 struct Spot {
@@ -160,6 +221,9 @@ pub struct Flyout {
     frames: u32,
     held: HashMap<Target, (f32, Instant)>,
     icons: HashMap<String, Option<TextureHandle>>,
+    settings: Settings,
+    /// Блоки устройств на этом кадре — цели перетаскивания.
+    targets: Vec<(String, Flow, Rect)>,
 }
 
 fn install_look(ctx: &egui::Context) {
@@ -174,10 +238,12 @@ fn install_look(ctx: &egui::Context) {
 
 impl Flyout {
     /// Окно в процессе трея: создаётся при старте спрятанным под плащом и ждёт щелчка.
-    pub fn in_tray(ctx: &egui::Context, hwnd: isize, audio: Audio, want_h: f32, shared: Arc<Shared>) -> Flyout {
+    pub fn in_tray(ctx: &egui::Context, hwnd: isize, audio: Audio, snapshot: &Snapshot, shared: Arc<Shared>) -> Flyout {
         install_look(ctx);
         sys::cloak(hwnd, true);
-        Flyout::make(audio, hwnd, shared, false, want_h)
+        let mut f = Flyout::make(audio, hwnd, shared, false, 0.0);
+        f.want_h = content_height(snapshot, f.settings.expanded);
+        f
     }
 
     /// Отдельный процесс `--flyout`: открыто сразу. `anchor` — прямоугольник значка; `None` — угол рабочей
@@ -199,7 +265,9 @@ impl Flyout {
         let shared = Arc::new(Shared::new(ctx.clone(), hwnd));
         *shared.pending.lock().unwrap() = Some((anchor, by_click));
         shared.state.store(OPENING, Ordering::SeqCst);
-        Ok(Flyout::make(audio, hwnd, shared, true, content_height(&snapshot)))
+        let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
+        f.want_h = content_height(&snapshot, f.settings.expanded);
+        Ok(f)
     }
 
     fn make(audio: Audio, hwnd: isize, shared: Arc<Shared>, standalone: bool, want_h: f32) -> Flyout {
@@ -218,6 +286,8 @@ impl Flyout {
             frames: 0,
             held: HashMap::new(),
             icons: HashMap::new(),
+            settings: Settings::load(),
+            targets: Vec::new(),
         }
     }
 
@@ -326,7 +396,7 @@ impl crate::shell::Content for Flyout {
             self.frames = 0;
             self.reveal = true;
             if let Ok(s) = self.control.snapshot() {
-                self.want_h = content_height(&s);
+                self.want_h = content_height(&s, self.settings.expanded);
             }
             self.layout();
         }
@@ -348,7 +418,7 @@ impl crate::shell::Content for Flyout {
 
         let Ok(snapshot) = self.control.snapshot() else { return };
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
-        let want = content_height(&snapshot);
+        let want = content_height(&snapshot, self.settings.expanded);
         if (self.want_h - want).abs() > 0.5 {
             self.want_h = want;
             self.layout();
@@ -360,30 +430,50 @@ impl crate::shell::Content for Flyout {
             .stroke(Stroke::new(1.0, p.border_strong))
             .corner_radius(radius::WINDOW)
             .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
+        self.targets.clear();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let devs: Vec<Device> = outputs(&snapshot).into_iter().cloned().collect();
-                if devs.is_empty() {
+                let list: Vec<Block> = blocks(&snapshot, self.settings.expanded);
+                if list.is_empty() {
                     note_row(ui, T::NoDevices.get());
                 }
-                for (i, d) in devs.iter().enumerate() {
-                    if i > 0 {
-                        ui.add_space(6.0);
-                        anvil_ui::widgets::divider(ui);
-                        ui.add_space(6.0);
-                    }
-                    self.device_row(ui, d, peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0));
-                    if d.apps.is_empty() {
-                        note_row(ui, T::NoApps.get());
-                    }
-                    for a in &d.apps {
-                        let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
-                        self.app_row(ui, a, peak);
+                let mut prev_device = false;
+                for b in &list {
+                    match b {
+                        Block::RecordingLabel => {
+                            gap(ui);
+                            label_row(ui, T::Recording.get());
+                            prev_device = false;
+                        }
+                        Block::Device(d) => {
+                            if prev_device {
+                                gap(ui);
+                            }
+                            prev_device = true;
+                            let top = ui.cursor().top();
+                            let peak = peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0);
+                            self.device_row(ui, d, peak);
+                            let apps = shown_apps(d);
+                            if apps.is_empty() {
+                                note_row(ui, T::NoApps.get());
+                            }
+                            for a in apps {
+                                let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
+                                self.app_row(ui, a, d.flow, &snapshot, peak);
+                            }
+                            let block = Rect::from_min_max(
+                                pos2(ui.min_rect().left(), top),
+                                pos2(ui.min_rect().right(), ui.cursor().top()),
+                            );
+                            self.targets.push((d.id.clone(), d.flow, block));
+                        }
                     }
                 }
+                self.footer(ui);
             });
         });
+        self.finish_drag(ctx);
         // Снимок для проверки вида: через несколько кадров после показа.
         if let Ok(path) = std::env::var("KAMERTON_SNAP") {
             self.frames += 1;
@@ -419,9 +509,56 @@ fn note_row(ui: &mut Ui, text: &str) {
     );
 }
 
+fn gap(ui: &mut Ui) {
+    ui.add_space(6.0);
+    anvil_ui::widgets::divider(ui);
+    ui.add_space(6.0);
+}
+
+/// Подпись раздела, как `section_label` набора, но в строке точной высоты.
+fn label_row(ui: &mut Ui, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), LABEL_ROW), Sense::hover());
+    let p = Palette::of(ui);
+    ui.painter().text(
+        pos2(rect.left(), rect.center().y),
+        Align2::LEFT_CENTER,
+        text.to_uppercase(),
+        anvil_ui::semibold(11.0),
+        p.weak,
+    );
+}
+
+/// Пункт меню с отметкой текущего.
+fn check_item(ui: &mut Ui, checked: bool, text: &str) -> bool {
+    let icon = checked.then_some(anvil_ui::Icon::Check);
+    anvil_ui::widgets::menu_item(ui, icon, text, None).clicked()
+}
+
 impl Flyout {
+    fn footer(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+        let (icon, text) = if self.settings.expanded {
+            (anvil_ui::Icon::ChevronUp, T::DefaultOnly.get())
+        } else {
+            (anvil_ui::Icon::ArrowDown, T::AllDevices.get())
+        };
+        let clicked = ui
+            .scope_builder(
+                egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, Some(icon), text).clicked(),
+            )
+            .inner;
+        if clicked {
+            self.settings.expanded = !self.settings.expanded;
+            self.settings.save();
+        }
+    }
+
     fn device_row(&mut self, ui: &mut Ui, d: &Device, peak: f32) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), DEVICE_ROW), Sense::hover());
+        // Правый щелчок по строке — меню; ползунок и кнопка лежат поверх и ловят свои щелчки сами.
+        let row = ui.interact(rect, ui.id().with(("devrow", &d.id)), Sense::click());
         let p = Palette::of(ui);
         let right = rect.right();
         let button = Rect::from_center_size(pos2(right - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
@@ -435,17 +572,40 @@ impl Flyout {
             Rect::from_min_max(pos2(rect.left(), rect.top() + 30.0), pos2(number.left() - 10.0, rect.top() + 46.0));
         let target = Target::Device(d.id.clone());
         let shown = self.shown_value(&target, d.volume);
-        if let Some(v) = slider(ui, ui.id().with(("dev", &d.id)), track, shown, d.muted, peak) {
+        let out = slider(ui, ui.id().with(("dev", &d.id)), track, shown, d.muted, peak);
+        if let Some(v) = out.value {
             self.set_volume(target.clone(), v);
         }
-        number_text(ui, number, shown, d.muted);
-        if mute_button(ui, button, ui.id().with(("devmute", &d.id)), shown, d.muted).clicked() {
-            let _ = self.control.set_muted(target, !d.muted);
+        if out.released {
+            // Как у EarTrumpet: тихий системный звук — услышать новую громкость.
+            sys::beep();
         }
+        number_text(ui, number, shown, d.muted);
+        let mute = mute_button(ui, button, ui.id().with(("devmute", &d.id)), shown, d.muted).clicked();
+        if mute || out.toggle_mute {
+            let _ = self.control.set_muted(target.clone(), !d.muted);
+        }
+        row.context_menu(|ui| {
+            if check_item(ui, d.is_default, T::MakeDefault.get()) {
+                let _ = self.control.set_default(&d.id, Roles::All);
+                ui.close();
+            }
+            if check_item(ui, d.is_comm, T::MakeComm.get()) {
+                let _ = self.control.set_default(&d.id, Roles::Communications);
+                ui.close();
+            }
+            anvil_ui::widgets::menu_separator(ui);
+            let text = if d.muted { T::Unmute.get() } else { T::Mute.get() };
+            if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
+                let _ = self.control.set_muted(target.clone(), !d.muted);
+                ui.close();
+            }
+        });
     }
 
-    fn app_row(&mut self, ui: &mut Ui, a: &App, peak: f32) {
+    fn app_row(&mut self, ui: &mut Ui, a: &App, flow: Flow, snapshot: &Snapshot, peak: f32) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), APP_ROW), Sense::hover());
+        let row = ui.interact(rect, ui.id().with(("approw", key_id(&a.key))), Sense::click());
         let p = Palette::of(ui);
         let ctx = ui.ctx().clone();
         let icon_rect = Rect::from_min_size(pos2(rect.left(), rect.center().y - ICON / 2.0), Vec2::splat(ICON));
@@ -469,15 +629,89 @@ impl Flyout {
         let name = if a.system { T::SystemSounds.get().to_string() } else { a.name.clone() };
         let name_rect = Rect::from_min_max(pos2(left, rect.top() + 4.0), pos2(number.left() - 8.0, rect.top() + 22.0));
         text_clipped(ui, name_rect, &name, FontId::proportional(14.0), p.text);
+        // Тянуть программу на другое устройство — за значок или имя.
+        if snapshot.can_route && !a.system {
+            let handle = Rect::from_min_max(icon_rect.min, name_rect.max);
+            let drag = ui.interact(handle, ui.id().with(("appdrag", key_id(&a.key))), Sense::drag());
+            if drag.drag_started() {
+                egui::DragAndDrop::set_payload(&ctx, DragApp { key: a.key.clone(), name: name.clone(), flow });
+            }
+            if drag.hovered() || drag.dragged() {
+                ctx.set_cursor_icon(if drag.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+            }
+        }
         let track = Rect::from_min_max(pos2(left, rect.top() + 24.0), pos2(number.left() - 10.0, rect.top() + 40.0));
         let target = Target::App(a.key.clone());
         let shown = self.shown_value(&target, a.volume);
-        if let Some(v) = slider(ui, ui.id().with(("app", key_id(&a.key))), track, shown, a.muted, peak) {
+        let out = slider(ui, ui.id().with(("app", key_id(&a.key))), track, shown, a.muted, peak);
+        if let Some(v) = out.value {
             self.set_volume(target.clone(), v);
         }
         number_text(ui, number, shown, a.muted);
-        if mute_button(ui, button, ui.id().with(("appmute", key_id(&a.key))), shown, a.muted).clicked() {
-            let _ = self.control.set_muted(target, !a.muted);
+        let mute = mute_button(ui, button, ui.id().with(("appmute", key_id(&a.key))), shown, a.muted).clicked();
+        if mute || out.toggle_mute {
+            let _ = self.control.set_muted(target.clone(), !a.muted);
+        }
+        if a.system {
+            return;
+        }
+        row.context_menu(|ui| {
+            let text = if a.muted { T::Unmute.get() } else { T::Mute.get() };
+            if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
+                let _ = self.control.set_muted(target.clone(), !a.muted);
+                ui.close();
+            }
+            anvil_ui::widgets::menu_separator(ui);
+            if !snapshot.can_route {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(format!("{} ({})", T::Device.get(), T::RouteUnavailable.get())),
+                );
+                return;
+            }
+            ui.menu_button(T::Device.get(), |ui| {
+                if check_item(ui, a.pinned.is_none(), T::AsSystem.get()) {
+                    let _ = self.control.move_app(a.key.clone(), None);
+                    ui.close();
+                }
+                anvil_ui::widgets::menu_separator(ui);
+                for d in snapshot.devices.iter().filter(|d| d.flow == flow) {
+                    if check_item(ui, a.pinned.as_deref() == Some(d.id.as_str()), &d.name) {
+                        let _ = self.control.move_app(a.key.clone(), Some(d.id.clone()));
+                        ui.close();
+                    }
+                }
+            });
+        });
+    }
+
+    /// Перетаскивание программы: подсветить подходящие блоки, при отпускании — перенести.
+    fn finish_drag(&mut self, ctx: &egui::Context) {
+        let Some(drag) = egui::DragAndDrop::payload::<DragApp>(ctx) else { return };
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let p = Palette::of_ctx(ctx);
+        let layer = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("kamerton-drag")));
+        let mut over = None;
+        for (id, flow, rect) in &self.targets {
+            if *flow != drag.flow || *id == drag.key.device {
+                continue;
+            }
+            let hit = pointer.is_some_and(|pt| rect.contains(pt));
+            let fill = if hit { p.soft(p.accent) } else { p.soft(p.weak) };
+            layer.rect_filled(rect.expand(2.0), radius::CONTROL, fill);
+            if hit {
+                layer.rect_stroke(rect.expand(2.0), radius::CONTROL, Stroke::new(1.5, p.accent), StrokeKind::Inside);
+                over = Some(id.clone());
+            }
+        }
+        if let Some(pt) = pointer {
+            layer.text(pt + vec2(14.0, 4.0), Align2::LEFT_TOP, &drag.name, FontId::proportional(13.0), p.text);
+        }
+        if ctx.input(|i| i.pointer.any_released()) {
+            egui::DragAndDrop::clear_payload(ctx);
+            if let Some(to) = over {
+                let _ = self.control.move_app(drag.key.clone(), Some(to));
+            }
         }
     }
 }
@@ -539,28 +773,41 @@ fn mute_button(ui: &mut Ui, rect: Rect, id: egui::Id, level: f32, muted: bool) -
     response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint)
 }
 
-/// Ползунок громкости 0..1 с полоской уровня. Возвращает новое значение, если его сдвинули.
-fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: f32) -> Option<f32> {
+/// Что сделали с ползунком за кадр.
+struct SliderOut {
+    value: Option<f32>,
+    /// Нажали M, пока ползунок в фокусе.
+    toggle_mute: bool,
+    /// Отпустили после перетаскивания.
+    released: bool,
+}
+
+/// Ползунок громкости 0..1 с полоской уровня. Ловит только левую кнопку: правый щелчок уходит строке
+/// (её меню).
+fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: f32) -> SliderOut {
     let p = Palette::of(ui);
-    let response = ui.interact(rect, id, Sense::click_and_drag());
+    let response = ui.interact(rect, id, Sense::drag());
     let track = Rect::from_min_max(
         pos2(rect.left() + 7.0, rect.center().y - 2.0),
         pos2(rect.right() - 7.0, rect.center().y + 2.0),
     );
     let mut out = None;
-    if (response.dragged() || response.clicked())
-        && let Some(pos) = response.interact_pointer_pos()
-    {
+    let pressed = response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
+    if pressed && let Some(pos) = response.interact_pointer_pos() {
         out = Some(model::step(((pos.x - track.left()) / track.width()).clamp(0.0, 1.0), 0.0));
         response.request_focus();
     }
     if response.has_focus() {
         let delta = ui.input(|i| {
             let mut d = 0.0;
-            if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::ArrowUp) {
+            if i.key_pressed(Key::ArrowRight)
+                || i.key_pressed(Key::ArrowUp)
+                || i.key_pressed(Key::Plus)
+                || i.key_pressed(Key::Equals)
+            {
                 d += STEP;
             }
-            if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowDown) {
+            if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Minus) {
                 d -= STEP;
             }
             if i.key_pressed(Key::PageUp) {
@@ -614,8 +861,10 @@ fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: 
         );
     }
     response.widget_info(|| egui::WidgetInfo::slider(true, (v * 100.0) as f64, ""));
+    let toggle_mute = response.has_focus() && ui.input(|i| i.key_pressed(Key::M));
+    let released = response.drag_stopped();
     let _ = response.on_hover_cursor(CursorIcon::PointingHand);
-    out
+    SliderOut { value: out, toggle_mute, released }
 }
 
 #[cfg(test)]
@@ -631,6 +880,7 @@ mod tests {
             volume: 0.5,
             muted: false,
             is_default: default,
+            is_comm: false,
             apps: (0..apps)
                 .map(|i| App {
                     key: AppKey { device: id.into(), exe: format!("{i}.exe") },
@@ -640,6 +890,7 @@ mod tests {
                     muted: false,
                     system: false,
                     pids: vec![i as u32],
+                    pinned: None,
                 })
                 .collect(),
         }
@@ -649,16 +900,46 @@ mod tests {
     fn default_device_first_and_inputs_hidden() {
         let mut mic = dev("mic", true, 0);
         mic.flow = Flow::Capture;
-        let s = Snapshot { devices: vec![dev("a", false, 0), mic, dev("b", true, 0)] };
+        let s = Snapshot { can_route: true, devices: vec![dev("a", false, 0), mic, dev("b", true, 0)] };
         let ids: Vec<&str> = outputs(&s).iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "a"]);
     }
 
     #[test]
     fn height_counts_rows() {
-        let s = Snapshot { devices: vec![dev("a", true, 2), dev("b", false, 0)] };
-        let want = 2.0 * PAD_Y + (DEVICE_ROW + 2.0 * APP_ROW) + SECTION_GAP + (DEVICE_ROW + EMPTY_ROW);
-        assert_eq!(content_height(&s), want);
-        assert_eq!(content_height(&Snapshot::default()), 2.0 * PAD_Y + EMPTY_ROW);
+        let mut mic = dev("mic", true, 1);
+        mic.flow = Flow::Capture;
+        mic.apps[0].system = true;
+        let s = Snapshot { can_route: true, devices: vec![dev("a", true, 2), dev("b", false, 0), mic] };
+        let collapsed = 2.0 * PAD_Y + (DEVICE_ROW + 2.0 * APP_ROW) + FOOTER;
+        assert_eq!(content_height(&s, false), collapsed);
+        // Развёрнуто: оба вывода, подпись записи, микрофон без «Системных звуков» — «нет программ».
+        let expanded = 2.0 * PAD_Y
+            + (DEVICE_ROW + 2.0 * APP_ROW)
+            + SECTION_GAP
+            + (DEVICE_ROW + EMPTY_ROW)
+            + SECTION_GAP
+            + LABEL_ROW
+            + (DEVICE_ROW + EMPTY_ROW)
+            + FOOTER;
+        assert_eq!(content_height(&s, true), expanded);
+        assert_eq!(content_height(&Snapshot::default(), true), 2.0 * PAD_Y + EMPTY_ROW + FOOTER);
+    }
+
+    #[test]
+    fn collapsed_shows_default_output_only() {
+        let mut mic = dev("mic", true, 0);
+        mic.flow = Flow::Capture;
+        let s = Snapshot { can_route: true, devices: vec![dev("a", false, 0), dev("b", true, 0), mic] };
+        let ids = |v: Vec<Block>| -> Vec<String> {
+            v.into_iter()
+                .map(|b| match b {
+                    Block::Device(d) => d.id.clone(),
+                    Block::RecordingLabel => "-".into(),
+                })
+                .collect()
+        };
+        assert_eq!(ids(blocks(&s, false)), vec!["b"]);
+        assert_eq!(ids(blocks(&s, true)), vec!["b", "a", "-", "mic"]);
     }
 }

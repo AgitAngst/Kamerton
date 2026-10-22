@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod config;
 mod d3d;
 mod flyout;
 mod icons;
@@ -113,8 +114,7 @@ fn run_tray() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             let shared = std::sync::Arc::new(flyout::Shared::new(ctx.clone(), hwnd));
             tray::start(audio.control(), shared.clone());
-            let want_h = flyout::content_height(&snapshot);
-            Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, want_h, shared)) as Box<dyn shell::Content>)
+            Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, &snapshot, shared)) as Box<dyn shell::Content>)
         }),
     )
 }

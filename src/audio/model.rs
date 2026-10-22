@@ -29,6 +29,8 @@ pub struct App {
     pub muted: bool,
     pub system: bool,
     pub pids: Vec<u32>,
+    /// Устройство, за которым программа закреплена (`None` — «как в системе»).
+    pub pinned: Option<String>,
 }
 
 /// Устройство вывода или ввода со своими программами.
@@ -41,12 +43,16 @@ pub struct Device {
     pub volume: f32,
     pub muted: bool,
     pub is_default: bool,
+    /// Устройство связи (роль communications).
+    pub is_comm: bool,
     pub apps: Vec<App>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
     pub devices: Vec<Device>,
+    /// Перенос программ на другое устройство доступен в этой сборке Windows.
+    pub can_route: bool,
 }
 
 /// Изменение, которое ядро отдаёт наружу. У событий устройства список программ пуст —
@@ -78,6 +84,14 @@ pub struct RawSession {
     pub volume: f32,
     pub muted: bool,
     pub system: bool,
+    /// Закрепление процесса за устройством.
+    pub pinned: Option<String>,
+}
+
+/// Служебные процессы, которые не показываются как программы (EarTrumpet #1095).
+pub fn hidden_exe(path: &str) -> bool {
+    let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    file.eq_ignore_ascii_case("audiodg.exe")
 }
 
 fn bare(d: &Device) -> Device {
@@ -117,6 +131,9 @@ pub fn group(device: &str, sessions: &[RawSession]) -> Vec<App> {
             if a.name.is_empty() {
                 a.name = s.name.clone();
             }
+            if a.pinned.is_none() {
+                a.pinned = s.pinned.clone();
+            }
             continue;
         }
         let name = if s.system {
@@ -137,6 +154,7 @@ pub fn group(device: &str, sessions: &[RawSession]) -> Vec<App> {
             muted: s.muted,
             system: s.system,
             pids: vec![s.pid],
+            pinned: s.pinned.clone(),
         });
     }
     // Windows отдаёт сессии в разном порядке — без сортировки каждый раз была бы «смена».
@@ -292,7 +310,15 @@ mod tests {
     use super::*;
 
     fn session(pid: u32, path: Option<&str>, vol: f32) -> RawSession {
-        RawSession { pid, path: path.map(Into::into), name: String::new(), volume: vol, muted: false, system: false }
+        RawSession {
+            pid,
+            path: path.map(Into::into),
+            name: String::new(),
+            volume: vol,
+            muted: false,
+            system: false,
+            pinned: None,
+        }
     }
 
     fn device(id: &str, apps: Vec<App>) -> Device {
@@ -303,6 +329,7 @@ mod tests {
             volume: 0.5,
             muted: false,
             is_default: false,
+            is_comm: false,
             apps,
         }
     }
@@ -351,13 +378,14 @@ mod tests {
 
     #[test]
     fn diff_same_is_empty() {
-        let s = Snapshot { devices: vec![device("a", group("a", &[session(1, Some("x.exe"), 1.0)]))] };
+        let s = Snapshot { can_route: true, devices: vec![device("a", group("a", &[session(1, Some("x.exe"), 1.0)]))] };
         assert!(diff(&s, &s.clone()).is_empty());
     }
 
     #[test]
     fn diff_reports_each_change_once() {
         let old = Snapshot {
+            can_route: true,
             devices: vec![
                 device("a", group("a", &[session(1, Some("x.exe"), 1.0), session(2, Some("y.exe"), 1.0)])),
                 device("gone", group("gone", &[session(3, Some("z.exe"), 1.0)])),
@@ -365,7 +393,7 @@ mod tests {
         };
         let mut a = device("a", group("a", &[session(1, Some("x.exe"), 0.4), session(4, Some("w.exe"), 1.0)]));
         a.is_default = true;
-        let new = Snapshot { devices: vec![a, device("b", Vec::new())] };
+        let new = Snapshot { can_route: true, devices: vec![a, device("b", Vec::new())] };
         let ev = diff(&old, &new);
         let text: Vec<String> = ev.iter().map(|e| e.to_string()).collect();
         assert_eq!(
@@ -385,6 +413,7 @@ mod tests {
     #[test]
     fn apply_diff_reaches_new_snapshot() {
         let old = Snapshot {
+            can_route: true,
             devices: vec![
                 device("a", group("a", &[session(1, Some("x.exe"), 1.0)])),
                 device("c", group("c", &[session(7, Some("q.exe"), 1.0)])),
@@ -392,7 +421,7 @@ mod tests {
         };
         let mut a = device("a", group("a", &[session(1, Some("x.exe"), 0.2), session(2, Some("y.exe"), 1.0)]));
         a.muted = true;
-        let new = Snapshot { devices: vec![a, device("b", group("b", &[session(3, None, 1.0)]))] };
+        let new = Snapshot { can_route: true, devices: vec![a, device("b", group("b", &[session(3, None, 1.0)]))] };
         let mut s = old.clone();
         for e in diff(&old, &new) {
             s.apply(&e);
@@ -410,6 +439,23 @@ mod tests {
         assert_eq!(step(0.99, 0.02), 1.0);
         assert_eq!(step(0.01, -0.02), 0.0);
         assert_eq!(step(0.333, 0.02), 0.35);
+    }
+
+    #[test]
+    fn audiodg_is_hidden() {
+        assert!(hidden_exe(r"C:\Windows\System32\AUDIODG.EXE"));
+        assert!(!hidden_exe(r"C:\Apps\player.exe"));
+    }
+
+    #[test]
+    fn pinned_device_kept_in_group() {
+        let mut a = session(1, Some("x.exe"), 1.0);
+        let mut b = session(2, Some("x.exe"), 1.0);
+        b.pinned = Some("phones".into());
+        assert_eq!(group("d", &[a.clone(), b.clone()])[0].pinned.as_deref(), Some("phones"));
+        a.pinned = None;
+        b.pinned = None;
+        assert_eq!(group("d", &[a, b])[0].pinned, None);
     }
 
     #[test]

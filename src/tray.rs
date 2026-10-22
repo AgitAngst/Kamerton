@@ -20,15 +20,16 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, HHOOK, HICON, ICONINFO, MF_SEPARATOR, MF_STRING, MSG,
-    MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
-    SetForegroundWindow, SetWindowsHookExW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
+    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, HHOOK, HICON, HMENU, ICONINFO, MENU_ITEM_FLAGS,
+    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSLLHOOKSTRUCT, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetWindowsHookExW,
+    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+    WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
-use crate::audio::{Control, Flow, model};
+use crate::audio::{Control, Flow, Roles, Target, model};
 use crate::flyout::Shared;
 use crate::placement::Rect;
 use crate::sys;
@@ -46,6 +47,11 @@ const WHEEL_STEP: f32 = 0.02;
 const CMD_MIXER: u32 = 1;
 const CMD_SETTINGS: u32 = 2;
 const CMD_EXIT: u32 = 3;
+const CMD_PLAYBACK: u32 = 4;
+const CMD_RECORDING: u32 = 5;
+const CMD_SOUNDS: u32 = 6;
+/// Пункты устройств: `CMD_DEVICE + номер` в списке устройств вывода.
+const CMD_DEVICE: u32 = 100;
 
 /// Окно трея — для `refresh` из потока звука и для хука.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -379,17 +385,51 @@ unsafe extern "system" fn wheel_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     unsafe { CallNextHookEx(Some(HHOOK::default()), code, wparam, lparam) }
 }
 
+/// Устройства вывода для меню: (id, имя, по умолчанию).
+fn menu_devices(control: &Control) -> Vec<(String, String, bool)> {
+    control
+        .snapshot()
+        .map(|s| {
+            s.devices.into_iter().filter(|d| d.flow == Flow::Render).map(|d| (d.id, d.name, d.is_default)).collect()
+        })
+        .unwrap_or_default()
+}
+
+/// «Без звука» у устройства вывода по умолчанию — средний щелчок по значку.
+fn toggle_default_mute(control: &Control) {
+    if let Ok(s) = control.snapshot()
+        && let Some(d) = s.devices.iter().find(|d| d.flow == Flow::Render && d.is_default)
+    {
+        let _ = control.set_muted(Target::Device(d.id.clone()), !d.muted);
+    }
+}
+
 unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
+    let ctx = CTX.get().expect("tray context");
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let item = |id: u32, t: T| {
-            let text = sys::wide(t.get());
-            let _ = AppendMenuW(menu, MF_STRING, id as usize, PCWSTR(text.as_ptr()));
+        let Ok(panels) = CreatePopupMenu() else { return };
+        let add = |m: HMENU, flags: MENU_ITEM_FLAGS, id: usize, text: &str| {
+            let w = sys::wide(text);
+            let _ = AppendMenuW(m, flags, id, PCWSTR(w.as_ptr()));
         };
-        item(CMD_MIXER, T::WindowsMixer);
-        item(CMD_SETTINGS, T::SoundSettings);
+        let devices = menu_devices(&ctx.control);
+        if devices.is_empty() {
+            add(menu, MF_STRING | MF_GRAYED, 0, T::NoDevices.get());
+        }
+        for (i, (_, name, default)) in devices.iter().enumerate() {
+            let check = if *default { MF_CHECKED } else { MF_UNCHECKED };
+            add(menu, MF_STRING | check, (CMD_DEVICE + i as u32) as usize, name);
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        item(CMD_EXIT, T::Exit);
+        add(panels, MF_STRING, CMD_MIXER as usize, T::WindowsMixer.get());
+        add(panels, MF_STRING, CMD_PLAYBACK as usize, T::PlaybackDevices.get());
+        add(panels, MF_STRING, CMD_RECORDING as usize, T::RecordingDevices.get());
+        add(panels, MF_STRING, CMD_SOUNDS as usize, T::Sounds.get());
+        add(panels, MF_STRING, CMD_SETTINGS as usize, T::SoundSettings.get());
+        add(menu, MF_POPUP, panels.0 as usize, T::WindowsPanels.get());
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        add(menu, MF_STRING, CMD_EXIT as usize, T::Exit.get());
         // Без этого меню не закрывается щелчком мимо (известное правило TrackPopupMenu для трея).
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, x, y, None, hwnd, None);
@@ -398,6 +438,14 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
         match cmd.0 as u32 {
             CMD_MIXER => sys::open("sndvol.exe"),
             CMD_SETTINGS => sys::open("ms-settings:sound"),
+            CMD_PLAYBACK => sys::run("control.exe", "mmsys.cpl,,0"),
+            CMD_RECORDING => sys::run("control.exe", "mmsys.cpl,,1"),
+            CMD_SOUNDS => sys::run("control.exe", "mmsys.cpl,,2"),
+            c if c >= CMD_DEVICE => {
+                if let Some((id, _, _)) = devices.get((c - CMD_DEVICE) as usize) {
+                    let _ = ctx.control.set_default(id, Roles::All);
+                }
+            }
             CMD_EXIT => {
                 let _ = DestroyWindow(hwnd);
             }
@@ -422,6 +470,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         ctx.shared.toggle(anchor);
                     }
                     WM_CONTEXTMENU => show_menu(hwnd, x, y),
+                    WM_MBUTTONUP => toggle_default_mute(&ctx.control),
                     WM_MOUSEMOVE => update_rect(hwnd),
                     _ => {}
                 }

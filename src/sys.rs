@@ -132,11 +132,26 @@ pub fn taskbar_light() -> bool {
     ok.is_ok() && value == 1
 }
 
+/// Запустить программу с параметрами (`control.exe`, `mmsys.cpl,,1`).
+pub fn run(file: &str, params: &str) {
+    let (f, p) = (wide(file), wide(params));
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(f.as_ptr()), PCWSTR(p.as_ptr()), None, SW_SHOWNORMAL);
+    }
+}
+
 /// Открыть адрес или программу оболочкой Windows (`ms-settings:sound`, `sndvol.exe`).
 pub fn open(target: &str) {
     let t = wide(target);
     unsafe {
         ShellExecuteW(None, w!("open"), PCWSTR(t.as_ptr()), None, None, SW_SHOWNORMAL);
+    }
+}
+
+/// Тихий системный звук «по умолчанию» — после смены громкости устройства.
+pub fn beep() {
+    unsafe {
+        let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(windows::Win32::UI::WindowsAndMessaging::MB_OK);
     }
 }
 

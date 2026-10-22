@@ -2,6 +2,7 @@
 // Окно и консоль видят только `Audio` и модель из model.rs; COM наружу не выходит.
 
 pub mod model;
+mod policy;
 mod win;
 
 use std::collections::BTreeSet;
@@ -15,6 +16,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninit
 // Окно этапа 0.2 берёт типы модели отсюда.
 #[allow(unused_imports)]
 pub use model::{App, AppKey, Device, Event, Flow, Snapshot, Target};
+pub use policy::Roles;
 pub use win::live_subscriptions;
 
 /// Склеивать метки, пока они идут чаще этого.
@@ -50,6 +52,8 @@ pub(crate) enum Command {
     AdjustDefault(f32, Reply<Result<f32, AudioError>>),
     Peaks(Reply<Vec<(Target, f32)>>),
     Snapshot(Reply<Snapshot>),
+    SetDefault(String, Roles, Reply<Result<(), AudioError>>),
+    MoveApp(AppKey, Option<String>, Reply<Result<(), AudioError>>),
 }
 
 /// Сообщение потоку звука: метка «перечитай» от Windows, команда или выход.
@@ -197,6 +201,16 @@ impl Control {
     pub fn snapshot(&self) -> Result<Snapshot, AudioError> {
         self.ask(Command::Snapshot)
     }
+
+    /// Устройство по умолчанию (`Roles::All`) или устройство связи.
+    pub fn set_default(&self, device: &str, roles: Roles) -> Result<(), AudioError> {
+        self.ask(|r| Command::SetDefault(device.to_string(), roles, r))?
+    }
+
+    /// Закрепить программу за устройством; `None` — «как в системе».
+    pub fn move_app(&self, app: AppKey, to: Option<String>) -> Result<(), AudioError> {
+        self.ask(|r| Command::MoveApp(app, to, r))?
+    }
 }
 
 impl Drop for Audio {
@@ -301,6 +315,16 @@ fn handle(engine: &mut win::Engine, msg: Msg, marks: &mut Marks) -> bool {
         Msg::Do(Command::Snapshot(r)) => {
             let _ = r.send(engine.snapshot());
         }
+        Msg::Do(Command::SetDefault(id, roles, r)) => {
+            let _ = r.send(engine.set_default(&id, roles));
+        }
+        Msg::Do(Command::MoveApp(key, to, r)) => {
+            let result = engine.move_app(&key, to.as_deref());
+            if result.is_ok() {
+                marks.sessions = true;
+            }
+            let _ = r.send(result);
+        }
         Msg::Quit => return false,
         Msg::Devices | Msg::Device(_) | Msg::Sessions => {}
     }
@@ -348,5 +372,10 @@ mod tests {
         assert_eq!(audio.set_volume(Target::App(key.clone()), 0.5), Err(AudioError::NotFound));
         assert_eq!(audio.set_muted(Target::App(key), true), Err(AudioError::NotFound));
         assert_eq!(audio.set_volume(Target::Device("no-such-device".into()), 0.5), Err(AudioError::NotFound));
+        // Перенос и смена устройства неизвестной цели — «не найдено» до любого вызова Windows.
+        let c = audio.control();
+        let key = AppKey { device: "no-such-device".into(), exe: "nothing.exe".into() };
+        assert_eq!(c.move_app(key, None), Err(AudioError::NotFound));
+        assert_eq!(c.set_default("no-such-device", Roles::All), Err(AudioError::NotFound));
     }
 }

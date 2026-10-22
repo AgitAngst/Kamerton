@@ -19,7 +19,7 @@ use windows::Win32::Media::Audio::{
     DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioSessionControl, IAudioSessionControl2,
     IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2, IAudioSessionNotification,
     IAudioSessionNotification_Impl, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-    ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eConsole, eRender,
+    ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eCommunications, eConsole, eRender,
 };
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
@@ -33,6 +33,7 @@ use windows::core::{GUID, Interface, PCWSTR, PWSTR, Ref, implement, w};
 use super::AudioError;
 use super::Msg;
 use super::model::{self, Device, Flow, RawSession, Snapshot, Target};
+use super::policy::{Policy, Roles};
 
 /// Сколько подписок на события Windows сейчас держит ядро. После выхода должно быть 0.
 static SUBS: AtomicIsize = AtomicIsize::new(0);
@@ -367,6 +368,7 @@ impl DeviceHandle {
                 volume: 0.0,
                 muted: false,
                 is_default: false,
+                is_comm: false,
                 apps: Vec::new(),
             };
             Ok(DeviceHandle { info, volume, volume_cb, meter, manager, new_cb, sessions: Vec::new() })
@@ -414,6 +416,9 @@ pub struct Engine {
     devices: Vec<DeviceHandle>,
     procs: HashMap<u32, ProcInfo>,
     descriptions: HashMap<String, Option<String>>,
+    policy: Policy,
+    /// Закрепление процесса за устройством, по (pid, направление): читается раз на процесс и после переноса.
+    routes: HashMap<(u32, Flow), Option<String>>,
 }
 
 impl Drop for Engine {
@@ -434,8 +439,16 @@ impl Engine {
         let client: IMMNotificationClient = DeviceClient { tx: tx.clone() }.into();
         unsafe { enumerator.RegisterEndpointNotificationCallback(&client)? };
         SUBS.fetch_add(1, Ordering::SeqCst);
-        let mut e =
-            Engine { enumerator, client, tx, devices: Vec::new(), procs: HashMap::new(), descriptions: HashMap::new() };
+        let mut e = Engine {
+            enumerator,
+            client,
+            tx,
+            devices: Vec::new(),
+            procs: HashMap::new(),
+            descriptions: HashMap::new(),
+            policy: Policy::new(),
+            routes: HashMap::new(),
+        };
         e.rescan_devices();
         Ok(e)
     }
@@ -447,6 +460,9 @@ impl Engine {
         for (edf, flow) in [(eRender, Flow::Render), (eCapture, Flow::Capture)] {
             let default_id =
                 unsafe { self.enumerator.GetDefaultAudioEndpoint(edf, eConsole) }.ok().and_then(|d| device_id(&d).ok());
+            let comm_id = unsafe { self.enumerator.GetDefaultAudioEndpoint(edf, eCommunications) }
+                .ok()
+                .and_then(|d| device_id(&d).ok());
             let Ok(list) = (unsafe { self.enumerator.EnumAudioEndpoints(edf, DEVICE_STATE_ACTIVE) }) else {
                 continue;
             };
@@ -466,6 +482,7 @@ impl Engine {
                 };
                 handle.info.name = device_name(&dev).unwrap_or_default();
                 handle.info.is_default = default_id.as_deref() == Some(id.as_str());
+                handle.info.is_comm = comm_id.as_deref() == Some(id.as_str());
                 handle.read_volume();
                 self.devices.push(handle);
             }
@@ -511,6 +528,7 @@ impl Engine {
             seen.extend(h.sessions.iter().map(|s| s.raw.pid));
         }
         self.procs.retain(|pid, _| seen.contains(pid));
+        self.routes.retain(|(pid, _), _| seen.contains(pid));
     }
 
     // Список сессий перебирается только здесь, один раз при открытии устройства. Каждый перебор,
@@ -530,7 +548,7 @@ impl Engine {
 
     /// Завести сессию, если её ещё нет, и прочитать её.
     fn take_session(&mut self, i: usize, ctrl: IAudioSessionControl) {
-        let Engine { devices, procs, descriptions, tx, .. } = self;
+        let Engine { devices, procs, descriptions, tx, policy, routes, .. } = self;
         let h = &mut devices[i];
         if unsafe { ctrl.GetState() }.map(|s| s == AudioSessionStateExpired).unwrap_or(true) {
             return;
@@ -545,7 +563,7 @@ impl Engine {
         let proc = procs.entry(pid).or_insert_with(|| {
             if system { ProcInfo { path: None, alive: true, watch: None } } else { open_process(pid, tx) }
         });
-        if !proc.alive() {
+        if !proc.alive() || proc.path.as_deref().is_some_and(model::hidden_exe) {
             return;
         }
         let Ok(simple) = ctrl.cast::<ISimpleAudioVolume>() else { return };
@@ -554,7 +572,11 @@ impl Engine {
             SUBS.fetch_add(1, Ordering::SeqCst);
         }
         let meter = ctrl.cast::<IAudioMeterInformation>().ok();
-        let raw = RawSession { pid, path: proc.path.clone(), name: String::new(), volume: 1.0, muted: false, system };
+        let flow = h.info.flow;
+        let pinned =
+            if system { None } else { routes.entry((pid, flow)).or_insert_with(|| policy.route(pid, flow)).clone() };
+        let raw =
+            RawSession { pid, path: proc.path.clone(), name: String::new(), volume: 1.0, muted: false, system, pinned };
         let mut s = SessionHandle { id, ctrl: ctrl2, simple, meter, events, raw };
         read_session(&mut s, descriptions);
         h.sessions.push(s);
@@ -583,7 +605,7 @@ impl Engine {
                 Device { apps: model::group(&h.info.id, &raw), ..h.info.clone() }
             })
             .collect();
-        Snapshot { devices }
+        Snapshot { devices, can_route: self.policy.can_route() }
     }
 
     fn device(&self, id: &str) -> Result<&DeviceHandle, AudioError> {
@@ -625,6 +647,38 @@ impl Engine {
             h.volume.SetMasterVolumeLevelScalar(level, std::ptr::null()).map_err(win)?;
             Ok(level)
         }
+    }
+
+    /// Сделать устройство устройством по умолчанию (все роли) или только устройством связи.
+    pub fn set_default(&self, id: &str, roles: Roles) -> Result<(), AudioError> {
+        self.device(id)?;
+        self.policy.set_default(id, roles).map_err(win)
+    }
+
+    /// Закрепить программу за устройством (`None` — «как в системе»), всем её процессам.
+    pub fn move_app(&mut self, key: &model::AppKey, to: Option<&str>) -> Result<(), AudioError> {
+        let flow = self.device(&key.device)?.info.flow;
+        if let Some(id) = to {
+            let target = self.device(id)?;
+            if target.info.flow != flow {
+                return Err(AudioError::NotFound);
+            }
+        }
+        let pids: Vec<u32> = self.app_sessions(key)?.iter().map(|s| s.raw.pid).collect();
+        for pid in &pids {
+            self.policy.set_route(*pid, flow, to).map_err(win)?;
+        }
+        // Закрепление поменяли мы — перечитать у Windows, а не верить себе.
+        for pid in &pids {
+            let now = self.policy.route(*pid, flow);
+            self.routes.insert((*pid, flow), now.clone());
+            for h in &mut self.devices {
+                for s in h.sessions.iter_mut().filter(|s| s.raw.pid == *pid) {
+                    s.raw.pinned = now.clone();
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn set_muted(&self, target: &Target, muted: bool) -> Result<(), AudioError> {

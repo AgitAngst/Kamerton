@@ -8,6 +8,8 @@
 | `src/audio/mod.rs` | `Audio`, `Control`: поток звука, каналы команд и событий, склейка меток |
 | `src/audio/win.rs` | COM: Core Audio, подписки на события Windows, слежение за процессами |
 | `src/audio/model.rs` | модель без COM: устройства, программы, события, разница снимков, шаг громкости |
+| `src/audio/policy.rs` | недокументированное: устройство по умолчанию (`IPolicyConfig`), закрепление программ (`AudioPolicyConfig`) |
+| `src/config.rs` | настройки: `%APPDATA%\Kamerton\settings.txt` |
 | `src/tray.rs` | поток трея: значок, подсказка, щелчок, меню, хук колеса |
 | `src/flyout.rs` | окно микшера и `Shared` — открыть/закрыть из потока трея |
 | `src/shell.rs` | цикл окна: winit + egui-winit, кадры по запросу egui, снимок |
@@ -114,3 +116,18 @@
 - Снимок кадра (`ViewportCommand::Screenshot`) — копия заднего буфера до `Present`, приходит в egui
   событием `Event::Screenshot`.
 - Кадры — только по запросу egui (`set_request_repaint_callback` будит цикл winit); в покое цикл спит.
+
+## Устройства и маршруты (этап 0.3)
+
+- Устройство по умолчанию — `IPolicyConfig::SetDefaultEndpoint` (COM, CLSID `870AF99C-…`), так делает
+  панель «Звук»: «по умолчанию» — роли console, multimedia и communications; «для связи» — только
+  communications. В снимке у устройства — `is_default` (console) и `is_comm` (communications).
+- Перенос программы — WinRT-фабрика `Windows.Media.Internal.AudioPolicyConfig`
+  (`RoGetActivationFactory`); IID у сборок Windows разный — пробуем `ab3d4648-…`, затем `2a59116d-…`.
+  `SetPersistedDefaultAudioEndpoint(pid, направление, роль, id)` для console и multimedia всем процессам
+  программы; пустой id — «как в системе». Id устройства в этом API —
+  `\\?\SWD#MMDEVAPI#<id>#{e6327cad-…}` (вывод) / `#{2eef81be-…}` (запись).
+- Закрепление (`App::pinned`) читается `GetPersistedDefaultAudioEndpoint` один раз на процесс (кеш по
+  pid и направлению) и после переноса. Фабрики нет — `Snapshot::can_route = false`, перенос в окне
+  недоступен с пояснением.
+- Всё недокументированное — только в `policy.rs`; ошибка отключает свою функцию, а не программу.

@@ -125,11 +125,20 @@ struct NewSession {
 }
 
 impl IAudioSessionNotification_Impl for NewSession_Impl {
-    fn OnSessionCreated(&self, _: Ref<IAudioSessionControl>) -> windows::core::Result<()> {
-        let _ = self.tx.send(Msg::Device(self.device.clone()));
+    fn OnSessionCreated(&self, session: Ref<IAudioSessionControl>) -> windows::core::Result<()> {
+        // Саму сессию отдаём потоку звука: перебирать список заново нельзя (см. `enumerate_sessions`).
+        if let Ok(c) = session.ok() {
+            let _ = self.tx.send(Msg::NewSession(self.device.clone(), NewControl(c.clone())));
+        }
         Ok(())
     }
 }
+
+/// Новая сессия из уведомления Windows по дороге в поток звука. Оба потока — MTA, а объекты
+/// Core Audio в MTA можно звать из любого его потока, поэтому переносить указатель можно.
+pub struct NewControl(IAudioSessionControl);
+
+unsafe impl Send for NewControl {}
 
 #[implement(IAudioSessionEvents)]
 struct SessionEvents {
@@ -198,11 +207,25 @@ impl Drop for ProcWatch {
 struct ProcInfo {
     path: Option<String>,
     alive: bool,
-    _watch: Option<ProcWatch>,
+    watch: Option<ProcWatch>,
+}
+
+impl ProcInfo {
+    /// Жив ли процесс сейчас. Для процессов с ожиданием — спросить Windows: `on_exit` только будит
+    /// поток, а отметку о смерти не ставит.
+    fn alive(&self) -> bool {
+        match &self.watch {
+            Some(w) => {
+                let mut code = 0u32;
+                unsafe { GetExitCodeProcess(w.process, &mut code) }.is_err() || code == STILL_ACTIVE
+            }
+            None => self.alive,
+        }
+    }
 }
 
 fn open_process(pid: u32, tx: &Sender<Msg>) -> ProcInfo {
-    let unknown = ProcInfo { path: None, alive: true, _watch: None };
+    let unknown = ProcInfo { path: None, alive: true, watch: None };
     let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) } {
         Ok(h) => h,
         // Такого процесса нет. Остальные отказы (нет доступа) — процесс жив, но закрыт.
@@ -243,7 +266,7 @@ fn open_process(pid: u32, tx: &Sender<Msg>) -> ProcInfo {
         }
         None
     };
-    ProcInfo { path, alive: true, _watch: watch }
+    ProcInfo { path, alive: true, watch }
 }
 
 /// Описание файла из его ресурсов версии («Google Chrome» вместо «chrome»).
@@ -362,6 +385,27 @@ impl DeviceHandle {
     }
 }
 
+/// Имя, громкость и «без звука» сессии.
+fn read_session(s: &mut SessionHandle, descriptions: &mut HashMap<String, Option<String>>) {
+    // Имя: из сессии (если это не ссылка на ресурс «@…»), иначе описание файла.
+    let display = unsafe { s.ctrl.GetDisplayName() }.map(take_pwstr).unwrap_or_default();
+    s.raw.name = if !display.is_empty() && !display.starts_with('@') {
+        display
+    } else if let Some(p) = &s.raw.path {
+        descriptions.entry(p.clone()).or_insert_with(|| file_description(p)).clone().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    unsafe {
+        if let Ok(v) = s.simple.GetMasterVolume() {
+            s.raw.volume = v;
+        }
+        if let Ok(m) = s.simple.GetMute() {
+            s.raw.muted = m.as_bool();
+        }
+    }
+}
+
 /// Всё, что ядро знает о звуке, плюс подписки на изменения.
 pub struct Engine {
     enumerator: IMMDeviceEnumerator,
@@ -399,6 +443,7 @@ impl Engine {
     /// Перечитать список устройств; у прежних устройств подписки остаются.
     pub fn rescan_devices(&mut self) {
         let mut old = std::mem::take(&mut self.devices);
+        let mut opened = Vec::new();
         for (edf, flow) in [(eRender, Flow::Render), (eCapture, Flow::Capture)] {
             let default_id =
                 unsafe { self.enumerator.GetDefaultAudioEndpoint(edf, eConsole) }.ok().and_then(|d| device_id(&d).ok());
@@ -409,14 +454,16 @@ impl Engine {
             for i in 0..count {
                 let Ok(dev) = (unsafe { list.Item(i) }) else { continue };
                 let Ok(id) = device_id(&dev) else { continue };
-                let handle = match old.iter().position(|h| h.info.id == id) {
+                let mut handle = match old.iter().position(|h| h.info.id == id) {
                     Some(p) => old.swap_remove(p),
                     None => match DeviceHandle::open(&dev, id.clone(), flow, &self.tx) {
-                        Ok(h) => h,
+                        Ok(h) => {
+                            opened.push(self.devices.len());
+                            h
+                        }
                         Err(_) => continue,
                     },
                 };
-                let mut handle = handle;
                 handle.info.name = device_name(&dev).unwrap_or_default();
                 handle.info.is_default = default_id.as_deref() == Some(id.as_str());
                 handle.read_volume();
@@ -424,14 +471,21 @@ impl Engine {
             }
         }
         drop(old);
-        self.rescan_sessions();
+        for i in 0..self.devices.len() {
+            if opened.contains(&i) {
+                self.enumerate_sessions(i);
+            } else {
+                self.refresh_sessions(i);
+            }
+        }
+        self.forget_dead_procs();
     }
 
     /// Перечитать одно устройство: громкость и его программы.
     pub fn rescan_device(&mut self, id: &str) {
         if let Some(i) = self.devices.iter().position(|h| h.info.id == id) {
             self.devices[i].read_volume();
-            self.read_sessions(i);
+            self.refresh_sessions(i);
             self.forget_dead_procs();
         }
     }
@@ -439,9 +493,16 @@ impl Engine {
     /// Перечитать программы всех устройств (например, закрылся процесс).
     pub fn rescan_sessions(&mut self) {
         for i in 0..self.devices.len() {
-            self.read_sessions(i);
+            self.refresh_sessions(i);
         }
         self.forget_dead_procs();
+    }
+
+    /// Сессия из уведомления Windows о новой сессии.
+    pub fn add_session(&mut self, device: &str, ctrl: NewControl) {
+        if let Some(i) = self.devices.iter().position(|h| h.info.id == device) {
+            self.take_session(i, ctrl.0);
+        }
     }
 
     fn forget_dead_procs(&mut self) {
@@ -452,71 +513,65 @@ impl Engine {
         self.procs.retain(|pid, _| seen.contains(pid));
     }
 
-    fn read_sessions(&mut self, i: usize) {
-        let Engine { devices, procs, descriptions, tx, .. } = self;
-        let h = &mut devices[i];
-        let Some(manager) = &h.manager else { return };
+    // Список сессий перебирается только здесь, один раз при открытии устройства. Каждый перебор,
+    // пока у нас на руках объекты сессий, оставляет в памяти процесса ~450 байт на каждую из них
+    // (замер 22.10.2026: ~5 КБ на проход по всем устройствам), и Windows их не возвращает. Дальше
+    // новые сессии приходят в `OnSessionCreated`, а прежние перечитываются через свои объекты.
+    fn enumerate_sessions(&mut self, i: usize) {
+        let Some(manager) = &self.devices[i].manager else { return };
         let Ok(list) = (unsafe { manager.GetSessionEnumerator() }) else { return };
         let count = unsafe { list.GetCount() }.unwrap_or(0);
-        let mut old = std::mem::take(&mut h.sessions);
-        let mut fresh = Vec::new();
         for k in 0..count {
-            let Ok(ctrl) = (unsafe { list.GetSession(k) }) else { continue };
-            if unsafe { ctrl.GetState() }.map(|s| s == AudioSessionStateExpired).unwrap_or(true) {
-                continue;
+            if let Ok(ctrl) = unsafe { list.GetSession(k) } {
+                self.take_session(i, ctrl);
             }
-            let Ok(ctrl2) = ctrl.cast::<IAudioSessionControl2>() else { continue };
-            let Ok(id) = (unsafe { ctrl2.GetSessionInstanceIdentifier() }).map(take_pwstr) else { continue };
-            let system = unsafe { ctrl2.IsSystemSoundsSession() } == S_OK;
-            let pid = unsafe { ctrl2.GetProcessId() }.unwrap_or(0);
-            let proc = procs.entry(pid).or_insert_with(|| {
-                if system { ProcInfo { path: None, alive: true, _watch: None } } else { open_process(pid, tx) }
-            });
-            if !proc.alive {
-                continue;
-            }
-            let mut s = match old.iter().position(|s| s.id == id) {
-                Some(p) => old.swap_remove(p),
-                None => {
-                    let Ok(simple) = ctrl.cast::<ISimpleAudioVolume>() else { continue };
-                    let events: IAudioSessionEvents =
-                        SessionEvents { tx: tx.clone(), device: h.info.id.clone() }.into();
-                    if unsafe { ctrl.RegisterAudioSessionNotification(&events) }.is_ok() {
-                        SUBS.fetch_add(1, Ordering::SeqCst);
-                    }
-                    let meter = ctrl.cast::<IAudioMeterInformation>().ok();
-                    let raw = RawSession {
-                        pid,
-                        path: proc.path.clone(),
-                        name: String::new(),
-                        volume: 1.0,
-                        muted: false,
-                        system,
-                    };
-                    SessionHandle { id, ctrl: ctrl2, simple, meter, events, raw }
-                }
-            };
-            // Имя: из сессии (если это не ссылка на ресурс «@…»), иначе описание файла.
-            let display = unsafe { ctrl.GetDisplayName() }.map(take_pwstr).unwrap_or_default();
-            s.raw.name = if !display.is_empty() && !display.starts_with('@') {
-                display
-            } else if let Some(p) = &s.raw.path {
-                descriptions.entry(p.clone()).or_insert_with(|| file_description(p)).clone().unwrap_or_default()
-            } else {
-                String::new()
-            };
-            unsafe {
-                if let Ok(v) = s.simple.GetMasterVolume() {
-                    s.raw.volume = v;
-                }
-                if let Ok(m) = s.simple.GetMute() {
-                    s.raw.muted = m.as_bool();
-                }
-            }
-            fresh.push(s);
         }
-        h.sessions = fresh;
-        // Оставшиеся в `old` сессии ушли — их подписки снимутся здесь.
+    }
+
+    /// Завести сессию, если её ещё нет, и прочитать её.
+    fn take_session(&mut self, i: usize, ctrl: IAudioSessionControl) {
+        let Engine { devices, procs, descriptions, tx, .. } = self;
+        let h = &mut devices[i];
+        if unsafe { ctrl.GetState() }.map(|s| s == AudioSessionStateExpired).unwrap_or(true) {
+            return;
+        }
+        let Ok(ctrl2) = ctrl.cast::<IAudioSessionControl2>() else { return };
+        let Ok(id) = (unsafe { ctrl2.GetSessionInstanceIdentifier() }).map(take_pwstr) else { return };
+        if h.sessions.iter().any(|s| s.id == id) {
+            return;
+        }
+        let system = unsafe { ctrl2.IsSystemSoundsSession() } == S_OK;
+        let pid = unsafe { ctrl2.GetProcessId() }.unwrap_or(0);
+        let proc = procs.entry(pid).or_insert_with(|| {
+            if system { ProcInfo { path: None, alive: true, watch: None } } else { open_process(pid, tx) }
+        });
+        if !proc.alive() {
+            return;
+        }
+        let Ok(simple) = ctrl.cast::<ISimpleAudioVolume>() else { return };
+        let events: IAudioSessionEvents = SessionEvents { tx: tx.clone(), device: h.info.id.clone() }.into();
+        if unsafe { ctrl.RegisterAudioSessionNotification(&events) }.is_ok() {
+            SUBS.fetch_add(1, Ordering::SeqCst);
+        }
+        let meter = ctrl.cast::<IAudioMeterInformation>().ok();
+        let raw = RawSession { pid, path: proc.path.clone(), name: String::new(), volume: 1.0, muted: false, system };
+        let mut s = SessionHandle { id, ctrl: ctrl2, simple, meter, events, raw };
+        read_session(&mut s, descriptions);
+        h.sessions.push(s);
+    }
+
+    /// Перечитать сессии устройства через их объекты; ушедшие (истёкшие, процесс закрыт) — убрать.
+    fn refresh_sessions(&mut self, i: usize) {
+        let Engine { devices, procs, descriptions, .. } = self;
+        let h = &mut devices[i];
+        h.sessions.retain(|s| {
+            let expired = unsafe { s.ctrl.GetState() }.map(|st| st == AudioSessionStateExpired).unwrap_or(true);
+            let alive = s.raw.system || procs.get(&s.raw.pid).is_none_or(|p| p.alive());
+            !expired && alive
+        });
+        for s in &mut h.sessions {
+            read_session(s, descriptions);
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {

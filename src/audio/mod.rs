@@ -57,6 +57,8 @@ pub(crate) enum Msg {
     Device(String),
     /// Закрылся процесс — перечитать программы всех устройств.
     Sessions,
+    /// Windows сообщила о новой сессии на устройстве и отдала её саму.
+    NewSession(String, win::NewControl),
     Do(Command),
     Quit,
 }
@@ -182,7 +184,7 @@ fn run(
 
     'outer: while let Ok(msg) = rx.recv() {
         let mut marks = Marks::default();
-        if !handle(&engine, msg, &mut marks) {
+        if !handle(&mut engine, msg, &mut marks) {
             break;
         }
         if !marks.any() {
@@ -192,7 +194,7 @@ fn run(
         while first.elapsed() < MAX_HOLD {
             match rx.recv_timeout(QUIET) {
                 Ok(m) => {
-                    if !handle(&engine, m, &mut marks) {
+                    if !handle(&mut engine, m, &mut marks) {
                         break 'outer;
                     }
                 }
@@ -225,11 +227,15 @@ fn run(
 }
 
 /// Выполнить команду сразу, метку — запомнить. `false` — пора выходить.
-fn handle(engine: &win::Engine, msg: Msg, marks: &mut Marks) -> bool {
+fn handle(engine: &mut win::Engine, msg: Msg, marks: &mut Marks) -> bool {
     if marks.add(&msg) {
         return true;
     }
     match msg {
+        Msg::NewSession(device, ctrl) => {
+            engine.add_session(&device, ctrl);
+            marks.device_ids.insert(device);
+        }
         Msg::Do(Command::SetVolume(t, v, r)) => {
             let _ = r.send(engine.set_volume(&t, v));
         }

@@ -65,6 +65,8 @@ pub(crate) enum Msg {
     Device(String),
     /// Закрылся процесс — перечитать программы всех устройств.
     Sessions,
+    /// Пересоздать ядро: служба звука перезапустилась, вернулись в сеанс Windows.
+    Reset,
     /// Windows сообщила о новой сессии на устройстве и отдала её саму.
     NewSession(String, win::NewControl),
     Do(Command),
@@ -74,6 +76,7 @@ pub(crate) enum Msg {
 /// Что перечитать после склейки меток.
 #[derive(Debug, Default, PartialEq)]
 struct Marks {
+    reset: bool,
     devices: bool,
     sessions: bool,
     device_ids: BTreeSet<String>,
@@ -83,6 +86,7 @@ impl Marks {
     /// Учесть метку; `false` — это не метка.
     fn add(&mut self, m: &Msg) -> bool {
         match m {
+            Msg::Reset => self.reset = true,
             Msg::Devices => self.devices = true,
             Msg::Sessions => self.sessions = true,
             Msg::Device(id) => {
@@ -94,12 +98,14 @@ impl Marks {
     }
 
     fn any(&self) -> bool {
-        self.devices || self.sessions || !self.device_ids.is_empty()
+        self.reset || self.devices || self.sessions || !self.device_ids.is_empty()
     }
 
     /// Самое широкое перечитывание поглощает узкие.
     fn plan(self) -> Marks {
-        if self.devices {
+        if self.reset {
+            Marks { reset: true, ..Default::default() }
+        } else if self.devices {
             Marks { devices: true, ..Default::default() }
         } else if self.sessions {
             Marks { sessions: true, ..Default::default() }
@@ -208,6 +214,11 @@ impl Control {
         self.ask(|r| Command::SetDefault(device.to_string(), roles, r))?
     }
 
+    /// Пересоздать ядро (вернулись в сеанс Windows и т. п.).
+    pub fn reset(&self) {
+        let _ = self.tx.send(Msg::Reset);
+    }
+
     /// Баланс стереоустройства: −1 — только левый, 1 — только правый.
     pub fn set_balance(&self, device: &str, balance: f32) -> Result<(), AudioError> {
         self.ask(|r| Command::SetBalance(device.to_string(), balance, r))?
@@ -238,7 +249,7 @@ fn run(
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
-    let engine = win::Engine::new(tx);
+    let engine = win::Engine::new(tx.clone());
     let mut engine = match engine {
         Ok(e) => e,
         Err(e) => {
@@ -250,10 +261,28 @@ fn run(
     let mut last = engine.snapshot();
     let _ = ready.send(Ok(last.clone()));
 
-    'outer: while let Ok(msg) = rx.recv() {
+    // Ядро не пересоздалось — следующая попытка не раньше чем через 2 с.
+    let mut retry: Option<Instant> = None;
+    'outer: loop {
+        let msg = match retry {
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(m) => Some(m),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => break,
+            },
+        };
         let mut marks = Marks::default();
-        if !handle(&mut engine, msg, &mut marks) {
-            break;
+        match msg {
+            Some(m) => {
+                if !handle(&mut engine, m, &mut marks) {
+                    break;
+                }
+            }
+            None => marks.reset = true,
         }
         if !marks.any() {
             continue;
@@ -275,9 +304,23 @@ fn run(
             engine.rescan_devices();
         } else if plan.sessions {
             engine.rescan_sessions();
-        } else {
+        } else if !plan.reset {
             for id in &plan.device_ids {
                 engine.rescan_device(id);
+            }
+        }
+        if plan.reset || !engine.healthy() {
+            // Новое ядро заменяет старое; лишние события на миг пересменки снимает разница снимков.
+            match win::Engine::new(tx.clone()) {
+                Ok(fresh) => {
+                    engine = fresh;
+                    retry = None;
+                    eprintln!("audio: core restarted");
+                }
+                Err(e) => {
+                    retry = Some(Instant::now() + Duration::from_secs(2));
+                    eprintln!("audio: restart failed, retry in 2 s: {}", e.message());
+                }
             }
         }
         let now = engine.snapshot();
@@ -335,7 +378,7 @@ fn handle(engine: &mut win::Engine, msg: Msg, marks: &mut Marks) -> bool {
             let _ = r.send(result);
         }
         Msg::Quit => return false,
-        Msg::Devices | Msg::Device(_) | Msg::Sessions => {}
+        Msg::Reset | Msg::Devices | Msg::Device(_) | Msg::Sessions => {}
     }
     true
 }
@@ -364,6 +407,15 @@ mod tests {
         m.add(&Msg::Sessions);
         m.add(&Msg::Devices);
         assert_eq!(m.plan(), Marks { devices: true, ..Default::default() });
+    }
+
+    #[test]
+    fn reset_wins_over_everything() {
+        let mut m = Marks::default();
+        m.add(&Msg::Devices);
+        m.add(&Msg::Reset);
+        m.add(&Msg::Device("a".into()));
+        assert_eq!(m.plan(), Marks { reset: true, ..Default::default() });
     }
 
     #[test]

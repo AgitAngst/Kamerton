@@ -165,6 +165,8 @@ pub struct Shared {
     pub capturing: AtomicBool,
     /// Колесо вне открытого окна меняет громкость — копия настройки для хука мыши (без блокировки).
     pub wheel_outside: AtomicBool,
+    /// Прогон на утечки: открыть, но не снимать плащ.
+    ghost: AtomicBool,
 }
 
 impl Shared {
@@ -183,9 +185,23 @@ impl Shared {
             hotkey_free: Mutex::new(HashMap::new()),
             capturing: AtomicBool::new(false),
             wheel_outside: AtomicBool::new(false),
+            ghost: AtomicBool::new(false),
         };
         s.wheel_outside.store(wheel, Ordering::SeqCst);
         s
+    }
+
+    /// Прогон на утечки: открыть как обычно, но оставить под плащом.
+    pub fn open_ghost(&self, anchor: PxRect) {
+        self.ghost.store(true, Ordering::SeqCst);
+        self.open(anchor, false);
+    }
+
+    /// Попросить окно закрыться (из другого потока).
+    pub fn request_close(&self) {
+        self.close.store(true, Ordering::SeqCst);
+        self.ctx.request_repaint();
+        sys::invalidate(self.hwnd());
     }
 
     pub fn is_open(&self) -> bool {
@@ -281,6 +297,8 @@ pub struct Flyout {
     all: Snapshot,
     /// Это окно микшера (`--mixer`): обычное окно, устройства колонками.
     mixer: bool,
+    /// Куда поставили окно в последний раз (x, y, ширина, высота) — сверка после смены масштаба.
+    placed: std::cell::Cell<Option<[i32; 4]>>,
     /// Блоки устройств на этом кадре — цели перетаскивания.
     targets: Vec<(String, Flow, Rect)>,
 }
@@ -379,6 +397,7 @@ impl Flyout {
             slide: None,
             all: Snapshot::default(),
             mixer: false,
+            placed: std::cell::Cell::new(None),
             targets: Vec::new(),
         }
     }
@@ -520,6 +539,7 @@ impl Flyout {
             );
         }
         sys::move_to(self.hwnd, x, y, w, h);
+        self.placed.set(Some([x, y, w, h]));
         sys::round_corners(self.hwnd, w, h, (radius::WINDOW as f32 * s.scale).round() as i32);
     }
 
@@ -531,6 +551,8 @@ impl Flyout {
         }
         sys::cloak(self.hwnd, true);
         sys::hide(self.hwnd);
+        self.shared.ghost.store(false, Ordering::SeqCst);
+        self.placed.set(None);
         self.held.clear();
         self.page = Page::Mixer;
         self.stop_capture();
@@ -584,7 +606,9 @@ impl crate::shell::Content for Flyout {
         }
         if self.reveal {
             self.reveal = false;
-            sys::cloak(self.hwnd, false);
+            if !self.shared.ghost.load(Ordering::SeqCst) {
+                sys::cloak(self.hwnd, false);
+            }
             if std::env::var_os("KAMERTON_TRACE").is_some() {
                 eprintln!("trace: revealed at {} ms", sys::now_ms() % 100_000);
             }
@@ -656,6 +680,13 @@ impl crate::shell::Content for Flyout {
         let Ok(all) = self.control.snapshot() else { return };
         let snapshot = self.shared.visible(&all);
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
+        // Windows сама поменяла размер или место (смена масштаба монитора, EarTrumpet #1304) — на место.
+        if self.slide.is_none()
+            && let (Some([x, y, w, h]), Some(r)) = (self.placed.get(), sys::window_rect(self.hwnd))
+            && (r.left != x || r.top != y || r.right - r.left != w || r.bottom - r.top != h)
+        {
+            self.layout();
+        }
         if let Some(start) = self.slide {
             self.layout();
             if start.elapsed().as_secs_f32() >= SLIDE_SECS {

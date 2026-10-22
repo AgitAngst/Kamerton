@@ -97,6 +97,35 @@ fn watch(peaks: bool, limit: Option<Duration>) -> Result<(), audio::AudioError> 
     Ok(())
 }
 
+/// Строка журнала падений.
+fn crash_line(unix: u64, version: &str, place: &str, message: &str) -> String {
+    format!("{unix} v{version} {place}: {}\n", message.replace(['\r', '\n'], " "))
+}
+
+/// Паника — строка в `%APPDATA%\Kamerton\crash.log`, потом обычный вывод Rust.
+fn install_crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let place = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        if let Some(base) = std::env::var_os("APPDATA") {
+            let dir = std::path::PathBuf::from(base).join("Kamerton");
+            let _ = std::fs::create_dir_all(&dir);
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let _ = f.write_all(crash_line(unix, env!("CARGO_PKG_VERSION"), &place, &message).as_bytes());
+            }
+        }
+        default(info);
+    }));
+}
+
 /// Трей: значок и ядро звука, без окна и OpenGL. Второй экземпляр молча выходит.
 fn run_tray() -> Result<(), String> {
     let Some(_instance) = sys::single_instance() else {
@@ -165,6 +194,7 @@ fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
 }
 
 fn main() {
+    install_crash_log();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         if let Err(e) = run_tray() {
@@ -211,5 +241,14 @@ fn main() {
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crash_line_is_one_line() {
+        let l = super::crash_line(1_700_000_000, "0.7.0", "src/x.rs:10", "boom\nsecond");
+        assert_eq!(l, "1700000000 v0.7.0 src/x.rs:10: boom second\n");
     }
 }

@@ -13,6 +13,9 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey};
 use windows::Win32::UI::Shell::{
@@ -46,6 +49,10 @@ const WM_TIMER: u32 = 0x0113;
 /// Таймер отложенной записи настроек (память громкости меняется часто — пишем не чаще раза в 2 с).
 const SAVE_TIMER: usize = 1;
 const WM_HOTKEY: u32 = 0x0312;
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_CONSOLE_CONNECT: usize = 0x1;
+const WTS_REMOTE_CONNECT: usize = 0x3;
+const WTS_SESSION_UNLOCK: usize = 0x8;
 const ICON_ID: u32 = 1;
 /// Выбор значка с клавиатуры (Win+B, стрелки, Enter).
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
@@ -301,6 +308,27 @@ pub fn open_mixer() {
     }
 }
 
+/// Прогон на утечки (`KAMERTON_CYCLE=N`): N раз открыть окно под плащом (невидимо) и закрыть,
+/// печатая свою память после 20-го и последнего раза.
+fn start_cycle(hwnd: HWND) {
+    let Some(n) = std::env::var("KAMERTON_CYCLE").ok().and_then(|v| v.parse::<u32>().ok()) else { return };
+    let Some(anchor) = icon_rect(hwnd) else { return };
+    let shared = CTX.get().expect("tray context").shared.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        eprintln!("cycle: start, private {:.1} MB", sys::private_mb());
+        for i in 1..=n {
+            shared.open_ghost(anchor);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            shared.request_close();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if i == 20 || i == n {
+                eprintln!("cycle: {i} opens, private {:.1} MB", sys::private_mb());
+            }
+        }
+    });
+}
+
 /// Шаг громкости сочетаний — как колесо: 2 %.
 const STEP: f32 = 0.02;
 
@@ -374,6 +402,9 @@ fn run(control: Control, shared: Arc<Shared>) {
             }
         }
         register_hotkeys(hwnd);
+        // Вернулись в сеанс (разблокировка, смена пользователя, удалённый стол) — пересоздать ядро звука.
+        let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+        start_cycle(hwnd);
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), Some(instance.into()), 0).ok();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -697,6 +728,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 LRESULT(0)
             }
+            WM_WTSSESSION_CHANGE => {
+                if matches!(wparam.0, WTS_CONSOLE_CONNECT | WTS_REMOTE_CONNECT | WTS_SESSION_UNLOCK) {
+                    ctx.control.reset();
+                }
+                LRESULT(0)
+            }
             WM_HOTKEY => {
                 run_hotkey(hwnd, wparam.0 as i32);
                 LRESULT(0)
@@ -733,6 +770,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_DESTROY => {
+                let _ = WTSUnRegisterSessionNotification(hwnd);
                 // Память громкости, ещё не записанная таймером.
                 ctx.shared.settings.lock().unwrap().save();
                 // Значок убрать до выхода, иначе в трее остаётся «призрак» до наведения мыши.

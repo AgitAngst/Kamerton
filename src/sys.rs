@@ -237,6 +237,22 @@ pub fn beep() {
     }
 }
 
+/// Своя память процесса (PrivateUsage), МБ.
+pub fn private_mb() -> f64 {
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    let mut c = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+    unsafe {
+        let _ = GetProcessMemoryInfo(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            &mut c as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+            c.cb,
+        );
+    }
+    c.PrivateUsage as f64 / 1_048_576.0
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }

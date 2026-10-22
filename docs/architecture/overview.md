@@ -173,3 +173,16 @@
   колонки `MIXER_COLUMN` = 340. Место и размер — `mixer_rect` при закрытии.
 - Баланс — `IAudioEndpointVolume`: у двухканальных устройств `GetChannelVolumeLevelScalar(0|1)` →
   `model::balance_of`; установка — `model::channels_for` → `SetChannelVolumeLevelScalar`.
+
+## Надёжность (этап 0.7)
+
+- Сброс ядра: после каждого пересмотра поток звука спрашивает `Engine::healthy` (перечислитель и
+  громкость устройств отвечают). Код ошибки из `win::needs_reset` (AUDCLNT_E_DEVICE_INVALIDATED,
+  AUDCLNT_E_SERVICE_NOT_RUNNING, RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE, RPC_S_CALL_FAILED) —
+  ядро создаётся заново; не вышло — повтор раз в 2 с. Снимок прошлого ядра остаётся, поэтому события
+  после сброса — только по разнице.
+- `Msg::Reset` (`Control::reset`) — то же по просьбе: трей шлёт его на `WM_WTSSESSION_CHANGE`
+  (подключение к консоли или удалённому столу, разблокировка).
+- Окно запоминает, куда его поставили; если Windows сама сменила размер или место (смена масштаба),
+  на следующем кадре окно ставится заново.
+- Паника пишется строкой в `%APPDATA%\Kamerton\crash.log`: время Unix, версия, место, сообщение.

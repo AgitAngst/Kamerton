@@ -73,6 +73,19 @@ fn win(e: windows::core::Error) -> AudioError {
     AudioError::Windows(e.message())
 }
 
+/// Ошибки, после которых объекты Core Audio мертвы и ядро надо пересоздать: устройство недействительно,
+/// служба звука не работает, связь со службой потеряна.
+pub fn needs_reset(code: i32) -> bool {
+    matches!(
+        code as u32,
+        0x8889_0004 // AUDCLNT_E_DEVICE_INVALIDATED
+            | 0x8889_0010 // AUDCLNT_E_SERVICE_NOT_RUNNING
+            | 0x8001_0108 // RPC_E_DISCONNECTED
+            | 0x8007_06BA // RPC_S_SERVER_UNAVAILABLE
+            | 0x8007_06BE // RPC_S_CALL_FAILED
+    )
+}
+
 // ---------- обратные вызовы ----------
 
 #[implement(IMMNotificationClient)]
@@ -508,6 +521,16 @@ impl Engine {
         self.forget_dead_procs();
     }
 
+    /// Живы ли объекты Core Audio: перечислитель и громкость каждого устройства отвечают.
+    pub fn healthy(&self) -> bool {
+        let dead = |r: windows::core::Result<()>| r.err().is_some_and(|e| needs_reset(e.code().0));
+        let enumerator = unsafe { self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }.map(|_| ());
+        if dead(enumerator) {
+            return false;
+        }
+        !self.devices.iter().any(|h| dead(unsafe { h.volume.GetMute() }.map(|_| ())))
+    }
+
     /// Перечитать одно устройство: громкость и его программы.
     pub fn rescan_device(&mut self, id: &str) {
         if let Some(i) = self.devices.iter().position(|h| h.info.id == id) {
@@ -735,5 +758,18 @@ impl Engine {
             out.extend(apps.into_iter().map(|(k, p)| (Target::App(k), p)));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::needs_reset;
+
+    #[test]
+    fn reset_codes() {
+        assert!(needs_reset(0x8889_0004_u32 as i32));
+        assert!(needs_reset(0x8007_06BA_u32 as i32));
+        assert!(!needs_reset(0x8007_0490_u32 as i32)); // E_NOTFOUND: устройства нет — это не поломка
+        assert!(!needs_reset(0));
     }
 }

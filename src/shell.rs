@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, ViewportCommand, ViewportId};
+use eframe::egui::{self, Color32, ViewportCommand, ViewportId, ViewportInfo};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::WindowEvent;
@@ -43,6 +43,8 @@ struct Shell {
     content: Option<Box<dyn Content>>,
     next: Option<Instant>,
     pending: Vec<egui::Event>,
+    /// Сведения об окне для egui (фокус, размер, масштаб) — их заполняет eframe, у нас — мы сами.
+    info: ViewportInfo,
     shown: bool,
     error: Option<String>,
 }
@@ -65,6 +67,7 @@ pub fn run(config: Config, make: Make) -> Result<(), String> {
         content: None,
         next: None,
         pending: Vec::new(),
+        info: ViewportInfo::default(),
         shown: false,
         error: None,
     };
@@ -89,6 +92,9 @@ impl Shell {
         };
         let mut input = state.take_egui_input(window);
         input.events.append(&mut self.pending);
+        // Без этого `viewport().focused` всегда пуст и потерю фокуса не увидеть.
+        egui_winit::update_viewport_info(&mut self.info, &self.ctx, window, !self.shown);
+        input.viewports.insert(ViewportId::ROOT, self.info.clone());
         let out = self.ctx.run_ui(input, |ui| content.ui(ui));
         state.handle_platform_output(window, out.platform_output);
         let mut capture = None;

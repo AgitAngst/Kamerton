@@ -12,6 +12,7 @@ mod flyout;
 mod hotkeys;
 mod icons;
 mod placement;
+mod profiles;
 mod shell;
 mod snap;
 mod sys;

@@ -240,6 +240,8 @@ pub struct Flyout {
     held: HashMap<Target, (f32, Instant)>,
     icons: HashMap<String, Option<TextureHandle>>,
     page: Page,
+    /// Профиль, у которого нажали «Удалить» — ждёт подтверждения.
+    deleting: Option<usize>,
     /// Раздел программы, открытый из её меню (путь exe в нижнем регистре).
     focus_app: Option<String>,
     /// Какое сочетание сейчас записывается.
@@ -291,9 +293,13 @@ impl Flyout {
         shared.state.store(OPENING, Ordering::SeqCst);
         let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
         f.want_h = content_height(&snapshot, f.shared.expanded());
-        // Проверка вида: `KAMERTON_PAGE=hotkeys` — сразу страница «Горячие клавиши».
-        if std::env::var("KAMERTON_PAGE").as_deref() == Ok("hotkeys") {
-            f.page = Page::Hotkeys;
+        // Проверка вида: `KAMERTON_PAGE=hotkeys|profiles` — сразу страница настроек.
+        match std::env::var("KAMERTON_PAGE").as_deref() {
+            Ok("hotkeys") => f.page = Page::Hotkeys,
+            Ok("profiles") => f.page = Page::Profiles,
+            _ => {}
+        }
+        if f.page != Page::Mixer {
             f.want_h = f.page_h;
         }
         Ok(f)
@@ -317,6 +323,7 @@ impl Flyout {
             icons: HashMap::new(),
             page: Page::Mixer,
             focus_app: None,
+            deleting: None,
             capture: None,
             // Пока страница не нарисована ни разу — примерная высота, чтобы не мигнуть крошечным окном.
             page_h: 460.0,
@@ -455,7 +462,7 @@ impl crate::shell::Content for Flyout {
         let Ok(snapshot) = self.control.snapshot() else { return };
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
         let want =
-            if self.page == Page::Hotkeys { self.page_h } else { content_height(&snapshot, self.shared.expanded()) };
+            if self.page != Page::Mixer { self.page_h } else { content_height(&snapshot, self.shared.expanded()) };
         if (self.want_h - want).abs() > 0.5 {
             self.want_h = want;
             self.layout();
@@ -468,13 +475,16 @@ impl crate::shell::Content for Flyout {
             .corner_radius(radius::WINDOW)
             .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
         self.targets.clear();
-        if self.page == Page::Hotkeys {
+        if self.page != Page::Mixer {
             let shown = egui::CentralPanel::default()
                 .frame(frame)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| self.hotkeys_page(ui, &snapshot))
+                        .show(ui, |ui| match self.page {
+                            Page::Profiles => self.profiles_page(ui, &snapshot),
+                            _ => self.hotkeys_page(ui, &snapshot),
+                        })
                         .content_size
                         .y
                 })
@@ -557,6 +567,7 @@ fn note_row(ui: &mut Ui, text: &str) {
 enum Page {
     Mixer,
     Hotkeys,
+    Profiles,
 }
 
 /// Поле сочетания: общее действие или действие программы.
@@ -695,6 +706,113 @@ impl Flyout {
         ui.add_space(4.0);
     }
 
+    fn profiles_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
+        ui.horizontal(|ui| {
+            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
+                self.page = Page::Mixer;
+                self.deleting = None;
+            }
+            ui.label(egui::RichText::new(T::Profiles.get()).font(anvil_ui::semibold(14.5)));
+        });
+        ui.add_space(6.0);
+        let mut st = self.shared.settings.lock().unwrap().clone();
+        let before = st.clone();
+
+        anvil_ui::widgets::section_label(ui, T::MemoryTitle.get());
+        anvil_ui::widgets::switch(ui, &mut st.remember, T::RememberVolumes.get());
+        ui.add_space(4.0);
+        let mut new_on = st.new_app_volume.is_some();
+        anvil_ui::widgets::switch(ui, &mut new_on, T::NewAppVolume.get());
+        if new_on {
+            let value = st.new_app_volume.unwrap_or(50) as f32 / 100.0;
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+            let number = Rect::from_min_max(pos2(row.right() - NUMBER_W, row.top()), row.max);
+            let track = Rect::from_min_max(row.min, pos2(number.left() - 10.0, row.bottom()));
+            let out = slider(ui, ui.id().with("newapp"), track, value, false, 0.0);
+            let v = out.value.unwrap_or(value);
+            number_text(ui, number, v, false);
+            st.new_app_volume = Some(model::percent(v) as u8);
+        } else {
+            st.new_app_volume = None;
+        }
+
+        ui.add_space(10.0);
+        anvil_ui::widgets::section_label(ui, T::Profiles.get());
+        if st.profiles.is_empty() {
+            anvil_ui::widgets::note(ui, T::NoProfiles.get());
+        }
+        let name_of = |id: &Option<String>| -> String {
+            match id {
+                None => T::Never.get().to_string(),
+                Some(id) => snapshot
+                    .devices
+                    .iter()
+                    .find(|d| &d.id == id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| T::NotConnected.get().to_string()),
+            }
+        };
+        let mut apply = None;
+        let mut remove = None;
+        for (i, p) in st.profiles.iter_mut().enumerate() {
+            anvil_ui::widgets::card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(150.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.deleting == Some(i) {
+                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Danger, None, T::Delete.get()).clicked() {
+                                remove = Some(i);
+                            }
+                            ui.label(egui::RichText::new(T::DeleteConfirm.get()).size(13.0));
+                        } else {
+                            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get()).clicked() {
+                                self.deleting = Some(i);
+                            }
+                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Secondary, None, T::Apply.get()).clicked()
+                            {
+                                apply = Some(i);
+                            }
+                        }
+                    });
+                });
+                let output = if p.output.is_some() { name_of(&p.output) } else { "—".to_string() };
+                let summary = format!("{}: {} · {}: {}", T::Output.get(), output, T::Apps.get(), p.apps.len());
+                anvil_ui::widgets::note(ui, summary);
+                ui.add_space(4.0);
+                // Подпись и выбор — друг под другом: в строку по-русски не помещаются.
+                ui.label(egui::RichText::new(T::OnConnect.get()).size(13.0));
+                egui::ComboBox::from_id_salt(("onconnect", i))
+                    .selected_text(name_of(&p.on_connect))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut p.on_connect, None, T::Never.get());
+                        for d in &snapshot.devices {
+                            ui.selectable_value(&mut p.on_connect, Some(d.id.clone()), &d.name);
+                        }
+                    });
+            });
+            ui.add_space(8.0);
+        }
+        if let Some(i) = remove {
+            st.profiles.remove(i);
+            self.deleting = None;
+        }
+        ui.add_space(4.0);
+        if anvil_ui::widgets::button(ui, anvil_ui::Kind::Primary, Some(anvil_ui::Icon::Save), T::SaveCurrent.get())
+            .clicked()
+        {
+            let name = format!("{} {}", T::ProfileName.get(), st.profiles.len() + 1);
+            st.profiles.push(crate::profiles::capture(&name, snapshot));
+        }
+        if st != before {
+            st.save();
+            *self.shared.settings.lock().unwrap() = st;
+        }
+        if let Some(i) = apply {
+            crate::tray::run_profile(&self.shared, &self.control, i);
+        }
+    }
+
     fn hotkeys_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         self.capture_keys(ui);
         ui.horizontal(|ui| {
@@ -779,7 +897,12 @@ impl Flyout {
                     let c = anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, Some(icon), text).clicked();
                     let g = ui
                         .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Hotkeys.get()).clicked()
+                            let g =
+                                anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Hotkeys.get()).clicked();
+                            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Layers, T::Profiles.get()).clicked() {
+                                self.page = Page::Profiles;
+                            }
+                            g
                         })
                         .inner;
                     (c, g)

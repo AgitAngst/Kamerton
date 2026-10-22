@@ -21,19 +21,20 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, HHOOK, HICON, HMENU, ICONINFO, MENU_ITEM_FLAGS,
-    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSLLHOOKSTRUCT, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetWindowsHookExW,
-    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-    WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
+    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, HHOOK, HICON, HMENU, ICONINFO, KillTimer,
+    MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSLLHOOKSTRUCT,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer,
+    SetWindowsHookExW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
-use crate::audio::{Control, Flow, Roles, Target, model};
+use crate::audio::{Control, Flow, Roles, Snapshot, Target, model};
 use crate::flyout::Shared;
 use crate::hotkeys::{Action, AppAction, Combo, next_output};
 use crate::placement::Rect;
+use crate::profiles::{self, Cmd};
 use crate::sys;
 use crate::texts::T;
 
@@ -41,6 +42,9 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_WHEEL: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
 const WM_RELOAD_HOTKEYS: u32 = WM_APP + 4;
+const WM_TIMER: u32 = 0x0113;
+/// Таймер отложенной записи настроек (память громкости меняется часто — пишем не чаще раза в 2 с).
+const SAVE_TIMER: usize = 1;
 const WM_HOTKEY: u32 = 0x0312;
 const ICON_ID: u32 = 1;
 /// Выбор значка с клавиатуры (Win+B, стрелки, Enter).
@@ -56,6 +60,11 @@ const CMD_RECORDING: u32 = 5;
 const CMD_SOUNDS: u32 = 6;
 /// Пункты устройств: `CMD_DEVICE + номер` в списке устройств вывода.
 const CMD_DEVICE: u32 = 100;
+/// Пункты профилей: `CMD_PROFILE + номер`.
+const CMD_PROFILE: u32 = 500;
+
+/// Последний снимок трея — от него считается разница по каждому `refresh`.
+static LAST: Mutex<Option<Snapshot>> = Mutex::new(None);
 
 /// Окно трея — для `refresh` из потока звука и для хука.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -218,6 +227,67 @@ fn run_hotkey(hwnd: HWND, id: i32) {
                 };
             }
         }
+    }
+}
+
+/// Выполнить команды профилей и памяти.
+pub fn run_cmds(c: &Control, cmds: Vec<Cmd>) {
+    for cmd in cmds {
+        let _ = match cmd {
+            Cmd::SetDefault(id) => c.set_default(&id, Roles::All),
+            Cmd::SetVolume(k, v) => c.set_volume(Target::App(k), v),
+            Cmd::SetMuted(k, m) => c.set_muted(Target::App(k), m),
+            Cmd::Move(k, to) => c.move_app(k, to),
+        };
+    }
+}
+
+/// Применить профиль номер `i` (из меню значка, со страницы «Профили» или по правилу).
+pub fn run_profile(shared: &Shared, c: &Control, i: usize) {
+    let Ok(now) = c.snapshot() else { return };
+    let cmds = {
+        let mut st = shared.settings.lock().unwrap();
+        let Some(p) = st.profiles.get(i).cloned() else { return };
+        let mut mem = std::mem::take(&mut st.memory);
+        let cmds = profiles::apply(&p, &now, &mut mem);
+        st.memory = mem;
+        st.save();
+        cmds
+    };
+    run_cmds(c, cmds);
+}
+
+/// Изменения ядра: память громкости, громкость новых программ, правило подключения.
+fn react_to_changes(hwnd: HWND) {
+    let ctx = CTX.get().expect("tray context");
+    let Ok(now) = ctx.control.snapshot() else { return };
+    let prev = LAST.lock().unwrap().replace(now.clone());
+    let Some(prev) = prev else { return };
+    let events = model::diff(&prev, &now);
+    if events.is_empty() {
+        return;
+    }
+    let (cmds, dirty, profile) = {
+        let mut st = ctx.shared.settings.lock().unwrap();
+        let list = st.profiles.clone();
+        let rules = profiles::Rules {
+            remember: st.remember,
+            new_app_volume: st.new_app_volume.map(|p| p as f32 / 100.0),
+            profiles: &list,
+        };
+        let mut mem = std::mem::take(&mut st.memory);
+        let out = profiles::react(&events, &now, &rules, &mut mem);
+        st.memory = mem;
+        out
+    };
+    if dirty {
+        unsafe {
+            let _ = SetTimer(Some(hwnd), SAVE_TIMER, 2000, None);
+        }
+    }
+    run_cmds(&ctx.control, cmds);
+    if let Some(i) = profile {
+        run_profile(&ctx.shared, &ctx.control, i);
     }
 }
 
@@ -547,6 +617,16 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
         add(panels, MF_STRING, CMD_RECORDING as usize, T::RecordingDevices.get());
         add(panels, MF_STRING, CMD_SOUNDS as usize, T::Sounds.get());
         add(panels, MF_STRING, CMD_SETTINGS as usize, T::SoundSettings.get());
+        let profile_names: Vec<String> =
+            ctx.shared.settings.lock().unwrap().profiles.iter().map(|p| p.name.clone()).collect();
+        if !profile_names.is_empty()
+            && let Ok(sub) = CreatePopupMenu()
+        {
+            for (i, name) in profile_names.iter().enumerate() {
+                add(sub, MF_STRING, (CMD_PROFILE + i as u32) as usize, name);
+            }
+            add(menu, MF_POPUP, sub.0 as usize, T::Profiles.get());
+        }
         add(menu, MF_POPUP, panels.0 as usize, T::WindowsPanels.get());
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         add(menu, MF_STRING, CMD_EXIT as usize, T::Exit.get());
@@ -561,6 +641,7 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
             CMD_PLAYBACK => sys::run("control.exe", "mmsys.cpl,,0"),
             CMD_RECORDING => sys::run("control.exe", "mmsys.cpl,,1"),
             CMD_SOUNDS => sys::run("control.exe", "mmsys.cpl,,2"),
+            c if c >= CMD_PROFILE => run_profile(&ctx.shared, &ctx.control, (c - CMD_PROFILE) as usize),
             c if c >= CMD_DEVICE => {
                 if let Some((id, _, _)) = devices.get((c - CMD_DEVICE) as usize) {
                     let _ = ctx.control.set_default(id, Roles::All);
@@ -610,6 +691,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_REFRESH => {
                 update_look(hwnd);
+                react_to_changes(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == SAVE_TIMER => {
+                let _ = KillTimer(Some(hwnd), SAVE_TIMER);
+                ctx.shared.settings.lock().unwrap().save();
                 LRESULT(0)
             }
             WM_DISPLAYCHANGE => {
@@ -626,6 +713,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_DESTROY => {
+                // Память громкости, ещё не записанная таймером.
+                ctx.shared.settings.lock().unwrap().save();
                 // Значок убрать до выхода, иначе в трее остаётся «призрак» до наведения мыши.
                 let d = base_data(hwnd);
                 let _ = Shell_NotifyIconW(NIM_DELETE, &d);

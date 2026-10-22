@@ -54,11 +54,26 @@ pub enum T {
     Taken,
     NotSet,
     CaptureHint,
+    Profiles,
+    MemoryTitle,
+    RememberVolumes,
+    NewAppVolume,
+    Apply,
+    Delete,
+    DeleteConfirm,
+    SaveCurrent,
+    OnConnect,
+    Never,
+    NotConnected,
+    ProfileName,
+    Output,
+    Apps,
+    NoProfiles,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 34] = [
+    pub const ALL: [T; 49] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -93,6 +108,21 @@ impl T {
         T::Taken,
         T::NotSet,
         T::CaptureHint,
+        T::Profiles,
+        T::MemoryTitle,
+        T::RememberVolumes,
+        T::NewAppVolume,
+        T::Apply,
+        T::Delete,
+        T::DeleteConfirm,
+        T::SaveCurrent,
+        T::OnConnect,
+        T::Never,
+        T::NotConnected,
+        T::ProfileName,
+        T::Output,
+        T::Apps,
+        T::NoProfiles,
     ];
 
     /// (русский, английский)
@@ -132,6 +162,24 @@ impl T {
             T::Taken => ("Занято другой программой", "Taken by another app"),
             T::NotSet => ("Не задано", "Not set"),
             T::CaptureHint => ("Esc — отмена, Backspace — убрать", "Esc — cancel, Backspace — remove"),
+            T::Profiles => ("Профили", "Profiles"),
+            T::MemoryTitle => ("Память", "Memory"),
+            T::RememberVolumes => ("Запоминать громкость программ", "Remember app volumes"),
+            T::NewAppVolume => ("Громкость новых программ", "Volume for new apps"),
+            T::Apply => ("Применить", "Apply"),
+            T::Delete => ("Удалить", "Delete"),
+            T::DeleteConfirm => ("Удалить профиль?", "Delete profile?"),
+            T::SaveCurrent => ("Сохранить текущее", "Save current"),
+            T::OnConnect => ("Включать при подключении", "Apply when connected"),
+            T::Never => ("Никогда", "Never"),
+            T::NotConnected => ("Не подключено", "Not connected"),
+            T::ProfileName => ("Профиль", "Profile"),
+            T::Output => ("Вывод", "Output"),
+            T::Apps => ("Программы", "Apps"),
+            T::NoProfiles => (
+                "Профилей пока нет: настройте звук и нажмите «Сохранить текущее»",
+                "No profiles yet: set up the sound and press «Save current»",
+            ),
         }
     }
 

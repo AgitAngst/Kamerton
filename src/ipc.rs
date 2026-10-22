@@ -150,24 +150,30 @@ mod server {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE};
-    use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe,
     };
-    use windows::core::HSTRING;
+    use windows::core::{HSTRING, w};
 
     use super::{Control, PIPE_NAME, answer, format_err};
 
     /// Столько подключений обслуживается разом; остальные закрываются сразу.
     const MAX_CLIENTS: usize = 8;
-    /// Клиент должен прислать строку за это время.
+    /// Клиент должен прислать всю строку за это время (общий срок, а не пауза между байтами).
     const READ_LIMIT: Duration = Duration::from_millis(1000);
     /// Дольше строка запроса быть не может.
     const MAX_LINE: usize = 4096;
+    /// Буфер ответа: ответ целиком входит в него, запись не ждёт клиента.
+    const OUT_BUF: u32 = 64 * 1024;
+    /// Доступ: владелец канала (пользователь, запустивший Kamerton) и система; остальным — ничего.
+    const SDDL: windows::core::PCWSTR = w!("D:P(A;;GA;;;OW)(A;;GA;;;SY)");
 
     static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
@@ -175,10 +181,18 @@ mod server {
     unsafe impl Send for Pipe {}
     impl Drop for Pipe {
         fn drop(&mut self) {
+            // Без `DisconnectNamedPipe`: закрытие сервером оставляет клиенту уже записанные данные.
             unsafe {
-                let _ = DisconnectNamedPipe(self.0);
                 let _ = CloseHandle(self.0);
             }
+        }
+    }
+
+    /// Вернуть счётчик подключений, даже если поток упал.
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -188,27 +202,40 @@ mod server {
             // Первый экземпляр: имя не должно быть уже занято чужим процессом.
             open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
         }
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(SDDL, SDDL_REVISION_1, &mut sd, None) }.ok()?;
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: false.into(),
+        };
         let h = unsafe {
             CreateNamedPipeW(
                 &HSTRING::from(PIPE_NAME),
                 open_mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
-                8192,
+                OUT_BUF,
                 8192,
                 0,
-                None,
+                Some(&sa),
             )
         };
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
         (!h.is_invalid()).then_some(Pipe(h))
     }
 
-    /// Прочитать строку запроса до `\n`, не дольше `READ_LIMIT`. Опрос `PeekNamedPipe` — чтобы молчащий
-    /// клиент не завесил поток навсегда.
+    /// Прочитать строку запроса до `\n`, не дольше `READ_LIMIT` всего. Опрос `PeekNamedPipe` — чтобы
+    /// молчащий клиент не завесил поток навсегда.
     fn read_line(pipe: &Pipe) -> Option<String> {
         let start = Instant::now();
         let mut buf: Vec<u8> = Vec::new();
         loop {
+            if start.elapsed() > READ_LIMIT {
+                return None;
+            }
             let mut avail = 0u32;
             unsafe { PeekNamedPipe(pipe.0, None, 0, None, Some(&mut avail), None) }.ok()?;
             if avail > 0 {
@@ -224,17 +251,17 @@ mod server {
                     return None;
                 }
             } else {
-                if start.elapsed() > READ_LIMIT {
-                    return None;
-                }
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
         String::from_utf8(buf).ok()
     }
 
+    /// Записать ответ в буфер канала. Буфер больше любого ответа, поэтому запись не ждёт клиента;
+    /// если он всё же переполнен — ждать не будем дольше срока клиента (запись в режиме ожидания
+    /// прервётся закрытием канала клиентом).
     fn write_all(pipe: &Pipe, data: &[u8]) {
-        let mut rest = data;
+        let mut rest = &data[..data.len().min(OUT_BUF as usize)];
         while !rest.is_empty() {
             let mut n = 0u32;
             if unsafe { WriteFile(pipe.0, Some(rest), Some(&mut n), None) }.is_err() || n == 0 {
@@ -242,12 +269,10 @@ mod server {
             }
             rest = &rest[n as usize..];
         }
-        unsafe {
-            let _ = FlushFileBuffers(pipe.0);
-        }
     }
 
     fn serve(pipe: Pipe, control: Control, open: fn() -> bool) {
+        let _slot = Slot;
         let reply = match read_line(&pipe) {
             Some(line) => answer(&line, &control, &open),
             None => format_err("bad-request"),
@@ -256,29 +281,45 @@ mod server {
     }
 
     pub fn run(control: Control, open: fn() -> bool) {
-        let mut first = true;
+        // Пока не создан первый экземпляр, имя берётся только с FIRST_PIPE_INSTANCE: занятое чужим
+        // процессом имя не присоединяет нас к чужому каналу. Дальше всегда есть живой экземпляр:
+        // следующий создаётся, пока предыдущий ещё держит имя.
+        let mut have_first = false;
+        let mut pending: Option<Pipe> = None;
         loop {
-            let Some(pipe) = create(first) else {
-                // Имя занято или Windows отказала: подождать и попробовать снова; программу это не роняет.
-                std::thread::sleep(Duration::from_secs(2));
-                first = false;
-                continue;
+            let pipe = match pending.take() {
+                Some(p) => p,
+                None => match create(!have_first) {
+                    Some(p) => {
+                        have_first = true;
+                        p
+                    }
+                    None => {
+                        // Имя занято или Windows отказала: подождать и попробовать снова.
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                },
             };
-            first = false;
             let connected =
                 unsafe { ConnectNamedPipe(pipe.0, None) }.is_ok() || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
             if !connected {
+                unsafe {
+                    let _ = DisconnectNamedPipe(pipe.0);
+                }
+                pending = Some(pipe);
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
+            // Следующий экземпляр — до обслуживания этого: имя не пустеет.
+            pending = create(false);
             if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
                 ACTIVE.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
             let control = control.clone();
-            let spawned = std::thread::Builder::new().name("ipc-client".into()).spawn(move || {
-                serve(pipe, control, open);
-                ACTIVE.fetch_sub(1, Ordering::SeqCst);
-            });
+            let spawned =
+                std::thread::Builder::new().name("ipc-client".into()).spawn(move || serve(pipe, control, open));
             if spawned.is_err() {
                 ACTIVE.fetch_sub(1, Ordering::SeqCst);
             }

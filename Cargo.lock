@@ -807,7 +807,6 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_glow",
- "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -1619,8 +1618,10 @@ version = "0.2.0"
 dependencies = [
  "anvil-ui",
  "eframe",
+ "egui-winit",
  "windows",
  "windows-core",
+ "winit",
 ]
 
 [[package]]

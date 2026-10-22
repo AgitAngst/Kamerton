@@ -10,7 +10,9 @@ cargo build -j 4
 
 Программа — `target\debug\kamerton.exe` (с консолью для журналов) или `target\release\kamerton.exe`
 (`cargo build --release -j 4`; без своей консоли, консольные ключи подключаются к консоли родителя).
-Рисует OpenGL (`eframe::Renderer::Glow`): wgpu, который eframe тянет по умолчанию, держит сотни МБ.
+Окно рисует свой цикл (`src/shell.rs`: winit + egui-winit) и свой рисовальщик egui на Direct3D 11
+(`src/d3d.rs`); eframe в программе только ради типов egui для набора anvil-ui. Замер 22.10.2026, своя
+память окна: D3D11 ~26 МБ, OpenGL через eframe ~110 МБ, wgpu 430–560 МБ.
 
 ## Проверки
 

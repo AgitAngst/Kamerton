@@ -79,10 +79,10 @@ pub struct Flyout {
 }
 
 impl Flyout {
-    /// `anchor` — прямоугольник значка в трее; `None` — угол рабочей области основного монитора.
-    /// `passive` — для проверки вида: не брать фокус и не закрываться без него.
-    pub fn new(cc: &eframe::CreationContext<'_>, anchor: Option<PxRect>, passive: bool) -> Result<Flyout, String> {
-        let ctx = cc.egui_ctx.clone();
+    /// `hwnd` — окно, в котором рисуем; `anchor` — прямоугольник значка в трее; `None` — угол рабочей
+    /// области основного монитора. `passive` — для проверки вида: не брать фокус и не закрываться без него.
+    pub fn new(ctx: &egui::Context, hwnd: isize, anchor: Option<PxRect>, passive: bool) -> Result<Flyout, String> {
+        let ctx = ctx.clone();
         let theme = match std::env::var("KAMERTON_THEME").ok().as_deref() {
             Some("light") => anvil_ui::ThemeChoice::Light,
             Some("dark") => anvil_ui::ThemeChoice::Dark,
@@ -90,7 +90,6 @@ impl Flyout {
         };
         anvil_ui::install(&ctx, anvil_ui::Accent::BLUE, theme);
         anvil_ui::motion::install(&ctx);
-        let hwnd = anvil_ui::taskbar::window_handle(cc).ok_or("no window handle")?;
         let wake_ctx = ctx.clone();
         let (audio, snapshot) = Audio::start_quiet(move || wake_ctx.request_repaint()).map_err(|e| e.to_string())?;
         let by_click = anchor.is_some() && !passive;
@@ -158,12 +157,12 @@ impl Flyout {
     }
 }
 
-impl eframe::App for Flyout {
-    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        anvil_ui::chrome::clear_color(visuals, anvil_ui::Accent::BLUE)
+impl crate::shell::Content for Flyout {
+    fn clear(&self, ctx: &egui::Context) -> Color32 {
+        Palette::of_ctx(ctx).card
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui) {
         let ctx = &ui.ctx().clone();
         anvil_ui::motion::tick(ctx);
         self.frames += 1;

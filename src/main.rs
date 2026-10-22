@@ -6,9 +6,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod d3d;
 mod flyout;
 mod icons;
 mod placement;
+mod shell;
 mod snap;
 mod sys;
 mod texts;
@@ -111,26 +113,12 @@ fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
         let v: Vec<i32> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (v.len() == 4).then(|| placement::Rect { left: v[0], top: v[1], right: v[2], bottom: v[3] })
     });
-    let viewport = eframe::egui::ViewportBuilder::default()
-        .with_title("Kamerton")
-        .with_decorations(false)
-        .with_always_on_top()
-        .with_taskbar(false)
-        .with_resizable(false)
-        .with_visible(false)
-        // Окно создаётся за экранами; на первом кадре `Flyout` ставит его на место, а eframe показывает.
-        .with_position([-32000.0, -32000.0])
-        .with_inner_size([flyout::WIDTH, 200.0]);
-    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
-    eframe::run_native(
-        "Kamerton",
-        options,
-        Box::new(move |cc| match flyout::Flyout::new(cc, anchor, passive) {
-            Ok(app) => Ok(Box::new(app) as Box<dyn eframe::App>),
-            Err(e) => Err(e.into()),
+    shell::run(
+        shell::Config { title: "Kamerton", size: [flyout::WIDTH, 200.0] },
+        Box::new(move |ctx, hwnd| {
+            flyout::Flyout::new(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn shell::Content>)
         }),
     )
-    .map_err(|e| e.to_string())
 }
 
 fn main() {

@@ -17,6 +17,7 @@ use eframe::egui::{
 
 use crate::audio::{App, AppKey, Audio, Control, Device, Flow, Roles, Snapshot, Target, model};
 use crate::config::Settings;
+use crate::hotkeys::{Action, AppAction, Combo};
 use crate::icons;
 use crate::placement::{self, Edge, Rect as PxRect};
 use crate::sys;
@@ -150,6 +151,12 @@ pub struct Shared {
     close: AtomicBool,
     exiting: AtomicBool,
     ctx: egui::Context,
+    /// Настройки — общие у окна (пишет) и трея (горячие клавиши).
+    pub settings: Mutex<Settings>,
+    /// Зарегистрировалось ли сочетание: ключ — строка из `settings.txt` (`hotkey.louder`, …).
+    pub hotkey_free: Mutex<HashMap<String, bool>>,
+    /// Окно записывает сочетание: трей снимает свои, чтобы нажатие дошло до окна.
+    pub capturing: AtomicBool,
 }
 
 impl Shared {
@@ -162,7 +169,18 @@ impl Shared {
             close: AtomicBool::new(false),
             exiting: AtomicBool::new(false),
             ctx,
+            settings: Mutex::new(Settings::load()),
+            hotkey_free: Mutex::new(HashMap::new()),
+            capturing: AtomicBool::new(false),
         }
+    }
+
+    pub fn request_repaint(&self) {
+        self.ctx.request_repaint();
+    }
+
+    pub fn expanded(&self) -> bool {
+        self.settings.lock().unwrap().expanded
     }
 
     /// Щелчок по значку: открыто — закрыть; закрыто — открыть у значка; открывается — ничего.
@@ -221,7 +239,13 @@ pub struct Flyout {
     frames: u32,
     held: HashMap<Target, (f32, Instant)>,
     icons: HashMap<String, Option<TextureHandle>>,
-    settings: Settings,
+    page: Page,
+    /// Раздел программы, открытый из её меню (путь exe в нижнем регистре).
+    focus_app: Option<String>,
+    /// Какое сочетание сейчас записывается.
+    capture: Option<Slot>,
+    /// Высота страницы настроек по прошлому кадру.
+    page_h: f32,
     /// Блоки устройств на этом кадре — цели перетаскивания.
     targets: Vec<(String, Flow, Rect)>,
 }
@@ -242,7 +266,7 @@ impl Flyout {
         install_look(ctx);
         sys::cloak(hwnd, true);
         let mut f = Flyout::make(audio, hwnd, shared, false, 0.0);
-        f.want_h = content_height(snapshot, f.settings.expanded);
+        f.want_h = content_height(snapshot, f.shared.expanded());
         f
     }
 
@@ -266,7 +290,12 @@ impl Flyout {
         *shared.pending.lock().unwrap() = Some((anchor, by_click));
         shared.state.store(OPENING, Ordering::SeqCst);
         let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
-        f.want_h = content_height(&snapshot, f.settings.expanded);
+        f.want_h = content_height(&snapshot, f.shared.expanded());
+        // Проверка вида: `KAMERTON_PAGE=hotkeys` — сразу страница «Горячие клавиши».
+        if std::env::var("KAMERTON_PAGE").as_deref() == Ok("hotkeys") {
+            f.page = Page::Hotkeys;
+            f.want_h = f.page_h;
+        }
         Ok(f)
     }
 
@@ -286,7 +315,11 @@ impl Flyout {
             frames: 0,
             held: HashMap::new(),
             icons: HashMap::new(),
-            settings: Settings::load(),
+            page: Page::Mixer,
+            focus_app: None,
+            capture: None,
+            // Пока страница не нарисована ни разу — примерная высота, чтобы не мигнуть крошечным окном.
+            page_h: 460.0,
             targets: Vec::new(),
         }
     }
@@ -316,6 +349,8 @@ impl Flyout {
         sys::cloak(self.hwnd, true);
         sys::hide(self.hwnd);
         self.held.clear();
+        self.page = Page::Mixer;
+        self.stop_capture();
         self.reveal = false;
         self.shared.close.store(false, Ordering::SeqCst);
         self.shared.hidden_at.store(sys::now_ms(), Ordering::SeqCst);
@@ -396,7 +431,7 @@ impl crate::shell::Content for Flyout {
             self.frames = 0;
             self.reveal = true;
             if let Ok(s) = self.control.snapshot() {
-                self.want_h = content_height(&s, self.settings.expanded);
+                self.want_h = content_height(&s, self.shared.expanded());
             }
             self.layout();
         }
@@ -410,7 +445,8 @@ impl crate::shell::Content for Flyout {
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
         let lost = self.by_click && self.was_focused && !focused;
         let asked = self.shared.close.load(Ordering::SeqCst);
-        if !warming && (lost || asked || ctx.input(|i| i.key_pressed(Key::Escape))) {
+        let esc = self.capture.is_none() && ctx.input(|i| i.key_pressed(Key::Escape));
+        if !warming && (lost || asked || esc) {
             self.close(ctx);
             return;
         }
@@ -418,7 +454,8 @@ impl crate::shell::Content for Flyout {
 
         let Ok(snapshot) = self.control.snapshot() else { return };
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
-        let want = content_height(&snapshot, self.settings.expanded);
+        let want =
+            if self.page == Page::Hotkeys { self.page_h } else { content_height(&snapshot, self.shared.expanded()) };
         if (self.want_h - want).abs() > 0.5 {
             self.want_h = want;
             self.layout();
@@ -431,10 +468,31 @@ impl crate::shell::Content for Flyout {
             .corner_radius(radius::WINDOW)
             .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
         self.targets.clear();
+        if self.page == Page::Hotkeys {
+            let shown = egui::CentralPanel::default()
+                .frame(frame)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.hotkeys_page(ui, &snapshot))
+                        .content_size
+                        .y
+                })
+                .inner;
+            let h = shown + 2.0 * PAD_Y + 2.0;
+            if (self.page_h - h).abs() > 0.5 {
+                self.page_h = h;
+                ctx.request_repaint();
+            }
+            if !self.snap_check(ctx) {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            return;
+        }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let list: Vec<Block> = blocks(&snapshot, self.settings.expanded);
+                let list: Vec<Block> = blocks(&snapshot, self.shared.expanded());
                 if list.is_empty() {
                     note_row(ui, T::NoDevices.get());
                 }
@@ -474,23 +532,8 @@ impl crate::shell::Content for Flyout {
             });
         });
         self.finish_drag(ctx);
-        // Снимок для проверки вида: через несколько кадров после показа.
-        if let Ok(path) = std::env::var("KAMERTON_SNAP") {
-            self.frames += 1;
-            if self.frames == 10 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-            }
-            let shot = ctx.input(|i| {
-                i.events.iter().find_map(|e| match e {
-                    Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            });
-            if let Some(image) = shot {
-                crate::snap::save(&path, &image);
-                self.close(ctx);
-                return;
-            }
+        if self.snap_check(ctx) {
+            return;
         }
         // Уровни живые, пока окно открыто.
         ctx.request_repaint_after(Duration::from_millis(33));
@@ -507,6 +550,191 @@ fn note_row(ui: &mut Ui, text: &str) {
         FontId::proportional(13.0),
         p.weak,
     );
+}
+
+/// Что показывает окно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Mixer,
+    Hotkeys,
+}
+
+/// Поле сочетания: общее действие или действие программы.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Slot {
+    Global(Action),
+    App(AppAction, String),
+}
+
+impl Slot {
+    /// Ключ в `settings.txt` — он же ключ состояния регистрации.
+    fn key(&self) -> String {
+        match self {
+            Slot::Global(a) => format!("hotkey.{}", a.key()),
+            Slot::App(a, exe) => format!("apphotkey.{}.{}", a.key(), exe),
+        }
+    }
+}
+
+fn action_text(a: Action) -> &'static str {
+    match a {
+        Action::Open => T::ActOpen.get(),
+        Action::Louder => T::ActLouder.get(),
+        Action::Quieter => T::ActQuieter.get(),
+        Action::Mute => T::Mute.get(),
+        Action::NextOutput => T::ActNext.get(),
+    }
+}
+
+fn app_action_text(a: AppAction) -> &'static str {
+    match a {
+        AppAction::Louder => T::ActLouder.get(),
+        AppAction::Quieter => T::ActQuieter.get(),
+        AppAction::Mute => T::Mute.get(),
+    }
+}
+
+impl Flyout {
+    /// Снимок для проверки вида (`KAMERTON_SNAP`): через несколько кадров после показа; `true` — окно закрыто.
+    fn snap_check(&mut self, ctx: &egui::Context) -> bool {
+        let Ok(path) = std::env::var("KAMERTON_SNAP") else { return false };
+        self.frames += 1;
+        if self.frames == 10 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = shot {
+            crate::snap::save(&path, &image);
+            self.close(ctx);
+            return true;
+        }
+        ctx.request_repaint();
+        false
+    }
+
+    fn stop_capture(&mut self) {
+        if self.capture.take().is_some() {
+            self.shared.capturing.store(false, Ordering::SeqCst);
+            crate::tray::reload_hotkeys();
+        }
+    }
+
+    fn start_capture(&mut self, slot: Slot) {
+        self.capture = Some(slot);
+        self.shared.capturing.store(true, Ordering::SeqCst);
+        crate::tray::reload_hotkeys();
+    }
+
+    /// Нажатие во время записи: Esc — отмена, Backspace — убрать, годное сочетание — записать.
+    fn capture_keys(&mut self, ui: &Ui) {
+        let Some(slot) = self.capture.clone() else { return };
+        let press = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                _ => None,
+            })
+        });
+        let Some((key, mods)) = press else { return };
+        let new = match key {
+            Key::Escape => {
+                self.stop_capture();
+                return;
+            }
+            Key::Backspace => None,
+            _ => match Combo::from_press(key, mods) {
+                Some(c) => Some(c),
+                None => return,
+            },
+        };
+        {
+            let mut s = self.shared.settings.lock().unwrap();
+            match (&slot, new) {
+                (Slot::Global(a), Some(c)) => {
+                    s.hotkeys.insert(*a, c);
+                }
+                (Slot::Global(a), None) => {
+                    s.hotkeys.remove(a);
+                }
+                (Slot::App(a, exe), Some(c)) => {
+                    s.app_hotkeys.insert((*a, exe.clone()), c);
+                }
+                (Slot::App(a, exe), None) => {
+                    s.app_hotkeys.remove(&(*a, exe.clone()));
+                }
+            }
+            s.save();
+        }
+        self.stop_capture();
+    }
+
+    /// Строка: имя действия и поле сочетания набора.
+    fn hotkey_row(&mut self, ui: &mut Ui, name: &str, slot: Slot, combo: Option<Combo>) {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(name).size(14.0));
+        let capturing = self.capture.as_ref() == Some(&slot);
+        let parts: Vec<String> = combo.map(|c| c.parts()).unwrap_or_default();
+        let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let free = self.shared.hotkey_free.lock().unwrap().get(&slot.key()).copied();
+        let status = match (capturing, combo, free) {
+            (true, _, _) => Some((true, T::CaptureHint.get())),
+            (false, Some(_), Some(false)) => Some((false, T::Taken.get())),
+            (false, Some(_), _) => Some((true, T::Free.get())),
+            (false, None, _) => None,
+        };
+        let change = if capturing { T::PressKeys.get() } else { T::Change.get() };
+        let shown_keys: Vec<&str> = if keys.is_empty() && !capturing { vec![T::NotSet.get()] } else { keys };
+        if anvil_ui::widgets::hotkey_field(ui, &shown_keys, change, status).clicked() && !capturing {
+            self.stop_capture();
+            self.start_capture(slot);
+        }
+        ui.add_space(4.0);
+    }
+
+    fn hotkeys_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
+        self.capture_keys(ui);
+        ui.horizontal(|ui| {
+            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
+                self.stop_capture();
+                self.page = Page::Mixer;
+            }
+            ui.label(egui::RichText::new(T::Hotkeys.get()).font(anvil_ui::semibold(14.5)));
+        });
+        ui.add_space(6.0);
+        anvil_ui::widgets::section_label(ui, T::General.get());
+        let settings = self.shared.settings.lock().unwrap().clone();
+        for a in Action::ALL {
+            self.hotkey_row(ui, action_text(a), Slot::Global(a), settings.hotkeys.get(&a).copied());
+        }
+        // Программы: у которых уже есть сочетания, и та, чьё меню открыло страницу.
+        let mut exes: Vec<String> = settings.app_hotkeys.keys().map(|(_, e)| e.clone()).collect();
+        if let Some(e) = &self.focus_app {
+            exes.push(e.clone());
+        }
+        exes.sort();
+        exes.dedup();
+        for exe in exes {
+            ui.add_space(8.0);
+            anvil_ui::widgets::divider(ui);
+            ui.add_space(6.0);
+            let name = snapshot
+                .devices
+                .iter()
+                .flat_map(|d| d.apps.iter())
+                .find(|a| a.key.exe == exe)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(&exe).to_string());
+            anvil_ui::widgets::section_label(ui, &name);
+            for a in AppAction::ALL {
+                let combo = settings.app_hotkeys.get(&(a, exe.clone())).copied();
+                self.hotkey_row(ui, app_action_text(a), Slot::App(a, exe.clone()), combo);
+            }
+        }
+    }
 }
 
 fn gap(ui: &mut Ui) {
@@ -538,20 +766,34 @@ impl Flyout {
     fn footer(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-        let (icon, text) = if self.settings.expanded {
+        let expanded = self.shared.expanded();
+        let (icon, text) = if expanded {
             (anvil_ui::Icon::ChevronUp, T::DefaultOnly.get())
         } else {
             (anvil_ui::Icon::ArrowDown, T::AllDevices.get())
         };
-        let clicked = ui
+        let (clicked, gear) = ui
             .scope_builder(
                 egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, Some(icon), text).clicked(),
+                |ui| {
+                    let c = anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, Some(icon), text).clicked();
+                    let g = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Hotkeys.get()).clicked()
+                        })
+                        .inner;
+                    (c, g)
+                },
             )
             .inner;
         if clicked {
-            self.settings.expanded = !self.settings.expanded;
-            self.settings.save();
+            let mut s = self.shared.settings.lock().unwrap();
+            s.expanded = !s.expanded;
+            s.save();
+        }
+        if gear {
+            self.page = Page::Hotkeys;
+            self.focus_app = None;
         }
     }
 
@@ -655,10 +897,17 @@ impl Flyout {
         if a.system {
             return;
         }
+        let mut open_hotkeys = false;
         row.context_menu(|ui| {
             let text = if a.muted { T::Unmute.get() } else { T::Mute.get() };
             if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
                 let _ = self.control.set_muted(target.clone(), !a.muted);
+                ui.close();
+            }
+            if !a.key.exe.starts_with("pid:")
+                && anvil_ui::widgets::menu_item(ui, Some(anvil_ui::Icon::Gear), T::HotkeysMenu.get(), None).clicked()
+            {
+                open_hotkeys = true;
                 ui.close();
             }
             anvil_ui::widgets::menu_separator(ui);
@@ -683,6 +932,10 @@ impl Flyout {
                 }
             });
         });
+        if open_hotkeys {
+            self.page = Page::Hotkeys;
+            self.focus_app = Some(a.key.exe.clone());
+        }
     }
 
     /// Перетаскивание программы: подсветить подходящие блоки, при отпускании — перенести.

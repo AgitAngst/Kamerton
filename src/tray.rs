@@ -3,7 +3,7 @@
 // устройства по умолчанию (хук мыши), вид значка — уровень громкости глифом системного шрифта.
 
 use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NINF_KEY,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
@@ -31,6 +32,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::audio::{Control, Flow, Roles, Target, model};
 use crate::flyout::Shared;
+use crate::hotkeys::{Action, AppAction, Combo, next_output};
 use crate::placement::Rect;
 use crate::sys;
 use crate::texts::T;
@@ -38,6 +40,8 @@ use crate::texts::T;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_WHEEL: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
+const WM_RELOAD_HOTKEYS: u32 = WM_APP + 4;
+const WM_HOTKEY: u32 = 0x0312;
 const ICON_ID: u32 = 1;
 /// Выбор значка с клавиатуры (Win+B, стрелки, Enter).
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
@@ -104,6 +108,121 @@ impl Level {
 pub fn wheel_step(delta: i16) -> f32 {
     delta as f32 / 120.0 * WHEEL_STEP
 }
+
+/// Что висит на зарегистрированном сочетании.
+#[derive(Debug, Clone)]
+enum Bound {
+    Global(Action),
+    App(AppAction, String),
+}
+
+/// Зарегистрированные сочетания трея: id → действие. Живут в потоке трея.
+static BOUND: Mutex<Vec<(i32, Bound)>> = Mutex::new(Vec::new());
+
+/// Попросить трей перерегистрировать сочетания (поменялись настройки или идёт запись сочетания).
+pub fn reload_hotkeys() {
+    let h = TRAY_HWND.load(Ordering::SeqCst);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(sys::hwnd(h)), WM_RELOAD_HOTKEYS, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Снять все сочетания и зарегистрировать заново по настройкам; пока окно пишет сочетание — никаких.
+fn register_hotkeys(hwnd: HWND) {
+    let ctx = CTX.get().expect("tray context");
+    let mut bound = BOUND.lock().unwrap();
+    for (id, _) in bound.drain(..) {
+        unsafe {
+            let _ = UnregisterHotKey(Some(hwnd), id);
+        }
+    }
+    let mut free = std::collections::HashMap::new();
+    if !ctx.shared.capturing.load(Ordering::SeqCst) {
+        let settings = ctx.shared.settings.lock().unwrap().clone();
+        let mut items: Vec<(String, Bound, Combo)> = Vec::new();
+        for (a, c) in &settings.hotkeys {
+            items.push((format!("hotkey.{}", a.key()), Bound::Global(*a), *c));
+        }
+        for ((a, exe), c) in &settings.app_hotkeys {
+            items.push((format!("apphotkey.{}.{}", a.key(), exe), Bound::App(*a, exe.clone()), *c));
+        }
+        for (n, (key, what, combo)) in items.into_iter().enumerate() {
+            let id = n as i32 + 1;
+            let Some(vk) = combo.vk() else { continue };
+            let mods = HOT_KEY_MODIFIERS(combo.mods()) | MOD_NOREPEAT;
+            let ok = unsafe { RegisterHotKey(Some(hwnd), id, mods, vk) }.is_ok();
+            free.insert(key, ok);
+            if ok {
+                bound.push((id, what));
+            }
+        }
+    }
+    if std::env::var_os("KAMERTON_TRACE").is_some() {
+        eprintln!("trace: hotkeys {free:?}");
+    }
+    *ctx.shared.hotkey_free.lock().unwrap() = free;
+    ctx.shared.request_repaint();
+}
+
+/// Программы с этим exe на всех устройствах вывода.
+pub fn apps_with_exe<'a>(s: &'a crate::audio::Snapshot, exe: &str) -> Vec<&'a crate::audio::App> {
+    s.devices
+        .iter()
+        .filter(|d| d.flow == Flow::Render)
+        .flat_map(|d| d.apps.iter())
+        .filter(|a| a.key.exe == exe)
+        .collect()
+}
+
+fn run_hotkey(hwnd: HWND, id: i32) {
+    let ctx = CTX.get().expect("tray context");
+    let what = BOUND.lock().unwrap().iter().find(|(i, _)| *i == id).map(|(_, w)| w.clone());
+    let Some(what) = what else { return };
+    let c = &ctx.control;
+    match what {
+        Bound::Global(Action::Open) => {
+            let (x, y) = sys::cursor();
+            let anchor = icon_rect(hwnd).unwrap_or(Rect { left: x, top: y, right: x + 1, bottom: y + 1 });
+            ctx.shared.toggle(anchor);
+        }
+        Bound::Global(Action::Louder) => {
+            let _ = c.adjust_default(STEP);
+        }
+        Bound::Global(Action::Quieter) => {
+            let _ = c.adjust_default(-STEP);
+        }
+        Bound::Global(Action::Mute) => toggle_default_mute(c),
+        Bound::Global(Action::NextOutput) => {
+            if let Ok(s) = c.snapshot() {
+                let outs: Vec<&crate::audio::Device> = s.devices.iter().filter(|d| d.flow == Flow::Render).collect();
+                let ids: Vec<&str> = outs.iter().map(|d| d.id.as_str()).collect();
+                let current = outs.iter().find(|d| d.is_default).map(|d| d.id.as_str());
+                if let Some(next) = next_output(&ids, current) {
+                    let _ = c.set_default(next, Roles::All);
+                }
+            }
+        }
+        Bound::App(action, exe) => {
+            let Ok(s) = c.snapshot() else { return };
+            let apps = apps_with_exe(&s, &exe);
+            // «Без звука» по всем сессиям: хоть одна звучит — заглушить все, иначе включить все.
+            let mute_all = apps.iter().any(|a| !a.muted);
+            for a in apps {
+                let t = Target::App(a.key.clone());
+                let _ = match action {
+                    AppAction::Louder => c.set_volume(t, model::step(a.volume, STEP)),
+                    AppAction::Quieter => c.set_volume(t, model::step(a.volume, -STEP)),
+                    AppAction::Mute => c.set_muted(t, mute_all),
+                };
+            }
+        }
+    }
+}
+
+/// Шаг громкости сочетаний — как колесо: 2 %.
+const STEP: f32 = 0.02;
 
 /// Разбудить трей: перечитать громкость для значка. Зовётся из потока звука после изменений.
 pub fn refresh() {
@@ -174,6 +293,7 @@ fn run(control: Control, shared: Arc<Shared>) {
                 shared.open(r, false);
             }
         }
+        register_hotkeys(hwnd);
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), Some(instance.into()), 0).ok();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -476,6 +596,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 LRESULT(0)
             }
+            WM_HOTKEY => {
+                run_hotkey(hwnd, wparam.0 as i32);
+                LRESULT(0)
+            }
+            WM_RELOAD_HOTKEYS => {
+                register_hotkeys(hwnd);
+                LRESULT(0)
+            }
             WM_WHEEL => {
                 let _ = ctx.control.adjust_default(wheel_step(wparam.0 as u16 as i16));
                 LRESULT(0)
@@ -528,6 +656,41 @@ mod tests {
         assert_eq!(Level::of(0.34, false), Level::Mid);
         assert_eq!(Level::of(0.66, false), Level::Mid);
         assert_eq!(Level::of(0.67, false), Level::High);
+    }
+
+    #[test]
+    fn app_hotkeys_find_every_output_session() {
+        use crate::audio::{App, AppKey, Device, Snapshot};
+        let app = |dev: &str, exe: &str| App {
+            key: AppKey { device: dev.into(), exe: exe.into() },
+            name: exe.into(),
+            path: None,
+            volume: 1.0,
+            muted: false,
+            system: false,
+            pids: vec![1],
+            pinned: None,
+        };
+        let dev = |id: &str, flow: Flow, apps: Vec<App>| Device {
+            id: id.into(),
+            name: id.into(),
+            flow,
+            volume: 1.0,
+            muted: false,
+            is_default: false,
+            is_comm: false,
+            apps,
+        };
+        let s = Snapshot {
+            can_route: true,
+            devices: vec![
+                dev("spk", Flow::Render, vec![app("spk", "player.exe"), app("spk", "game.exe")]),
+                dev("phones", Flow::Render, vec![app("phones", "player.exe")]),
+                dev("mic", Flow::Capture, vec![app("mic", "player.exe")]),
+            ],
+        };
+        let found: Vec<&str> = apps_with_exe(&s, "player.exe").iter().map(|a| a.key.device.as_str()).collect();
+        assert_eq!(found, vec!["spk", "phones"]);
     }
 
     #[test]

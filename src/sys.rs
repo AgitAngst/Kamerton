@@ -42,6 +42,14 @@ fn rect(r: RECT) -> Rect {
     Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }
 
+pub fn cursor() -> (i32, i32) {
+    let mut p = POINT::default();
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
+    }
+    (p.x, p.y)
+}
+
 /// Монитор у точки: весь монитор, рабочая область и масштаб (1.0 = 96 dpi).
 pub fn monitor_at(x: i32, y: i32) -> (Rect, Rect, f32) {
     unsafe {

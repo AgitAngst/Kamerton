@@ -9,6 +9,7 @@ mod audio;
 mod config;
 mod d3d;
 mod flyout;
+mod hotkeys;
 mod icons;
 mod placement;
 mod shell;

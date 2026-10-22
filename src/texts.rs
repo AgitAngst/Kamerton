@@ -40,11 +40,25 @@ pub enum T {
     Recording,
     AllDevices,
     DefaultOnly,
+    Hotkeys,
+    HotkeysMenu,
+    Back,
+    General,
+    ActOpen,
+    ActLouder,
+    ActQuieter,
+    ActNext,
+    Change,
+    PressKeys,
+    Free,
+    Taken,
+    NotSet,
+    CaptureHint,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 20] = [
+    pub const ALL: [T; 34] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -65,6 +79,20 @@ impl T {
         T::Recording,
         T::AllDevices,
         T::DefaultOnly,
+        T::Hotkeys,
+        T::HotkeysMenu,
+        T::Back,
+        T::General,
+        T::ActOpen,
+        T::ActLouder,
+        T::ActQuieter,
+        T::ActNext,
+        T::Change,
+        T::PressKeys,
+        T::Free,
+        T::Taken,
+        T::NotSet,
+        T::CaptureHint,
     ];
 
     /// (русский, английский)
@@ -90,6 +118,20 @@ impl T {
             T::Recording => ("Запись", "Recording"),
             T::AllDevices => ("Все устройства", "All devices"),
             T::DefaultOnly => ("Только основное", "Default only"),
+            T::Hotkeys => ("Горячие клавиши", "Hotkeys"),
+            T::HotkeysMenu => ("Горячие клавиши…", "Hotkeys…"),
+            T::Back => ("Назад", "Back"),
+            T::General => ("Общие", "General"),
+            T::ActOpen => ("Открыть окно", "Open window"),
+            T::ActLouder => ("Громче", "Volume up"),
+            T::ActQuieter => ("Тише", "Volume down"),
+            T::ActNext => ("Следующее устройство вывода", "Next output device"),
+            T::Change => ("Изменить", "Change"),
+            T::PressKeys => ("Нажмите сочетание…", "Press keys…"),
+            T::Free => ("Свободно", "Free"),
+            T::Taken => ("Занято другой программой", "Taken by another app"),
+            T::NotSet => ("Не задано", "Not set"),
+            T::CaptureHint => ("Esc — отмена, Backspace — убрать", "Esc — cancel, Backspace — remove"),
         }
     }
 

@@ -31,15 +31,17 @@ python E:/dev_personal/tools/checks.py --repo . --logs E:/dev_personal/kamerton-
 |---|---|
 | `KAMERTON_LANG=ru\|en` | язык вместо системного |
 | `KAMERTON_THEME=light\|dark` | тема вместо системной |
-| `KAMERTON_OPEN=1` | при запуске открыть окно у значка, не забирая фокус |
-| `KAMERTON_SNAP=<файл.png>` | через 10 кадров после показа сохранить снимок окна (кадр eframe) |
+| `KAMERTON_OPEN=1` | трей при запуске открывает окно у значка (`--flyout … --passive`): без фокуса, не закрывается само |
+| `KAMERTON_SNAP=<файл.png>` | окно через 10 кадров сохраняет свой снимок (кадр eframe) и закрывается |
 | `KAMERTON_TRACE=1` | печатать в консоль место окна и прямоугольник значка |
 
-Снимок окна в нужной теме и языке, не трогая курсор:
+Снимок окна в нужной теме и языке, не трогая курсор (окно — в углу основного монитора):
 
 ```bash
-KAMERTON_OPEN=1 KAMERTON_THEME=dark KAMERTON_LANG=en KAMERTON_SNAP=E:/dev_personal/kamerton-scratch/snap-en-dark.png target/debug/kamerton.exe
+KAMERTON_THEME=dark KAMERTON_LANG=en KAMERTON_SNAP=E:/dev_personal/kamerton-scratch/snap-en-dark.png target/debug/kamerton.exe --flyout --passive
 ```
+
+То же у значка в трее: запустить трей с `KAMERTON_OPEN=1` и теми же переменными.
 
 Закрыть запущенный Kamerton как «Выход» в меню (значок убирается):
 

@@ -25,6 +25,9 @@ const HELP: &str = "Kamerton - tray volume mixer for Windows
 
 Usage:
   kamerton                   run in the tray (one instance)
+  kamerton --flyout [l,t,r,b] [--passive]
+                             open the mixer window at the tray icon rect (the tray does this on click;
+                             --passive: do not take focus, for checks)
   kamerton --list            print devices and apps, then exit
   kamerton --watch [--peaks] [--for <s>]
                              print audio events until Ctrl+C or for <s> seconds
@@ -89,12 +92,25 @@ fn watch(peaks: bool, limit: Option<Duration>) -> Result<(), audio::AudioError> 
     Ok(())
 }
 
-/// Трей и окно. Второй экземпляр молча выходит.
+/// Трей: значок и ядро звука, без окна и OpenGL. Второй экземпляр молча выходит.
 fn run_tray() -> Result<(), String> {
     let Some(_instance) = sys::single_instance() else {
         return Ok(());
     };
     texts::init();
+    let (audio, _) = Audio::start_quiet(tray::refresh).map_err(|e| e.to_string())?;
+    tray::run(audio.control());
+    Ok(())
+}
+
+/// Окно микшера — свой процесс: трей запускает его по щелчку, окно закрывается — процесс уходит.
+/// `anchor` — «left,top,right,bottom» значка в трее; без него — угол основного монитора (проверка).
+fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
+    texts::init();
+    let anchor = anchor.and_then(|a| {
+        let v: Vec<i32> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 4).then(|| placement::Rect { left: v[0], top: v[1], right: v[2], bottom: v[3] })
+    });
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Kamerton")
         .with_decorations(false)
@@ -102,21 +118,19 @@ fn run_tray() -> Result<(), String> {
         .with_taskbar(false)
         .with_resizable(false)
         .with_visible(false)
-        // eframe сам показывает окно после первого кадра — пусть это будет за пределами экранов;
-        // на втором кадре окно прячется (`Flyout::ui`).
+        // Окно создаётся за экранами; на первом кадре `Flyout` ставит его на место, а eframe показывает.
         .with_position([-32000.0, -32000.0])
         .with_inner_size([flyout::WIDTH, 200.0]);
     let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
-    let result = eframe::run_native(
+    eframe::run_native(
         "Kamerton",
         options,
-        Box::new(|cc| match flyout::Flyout::new(cc) {
+        Box::new(move |cc| match flyout::Flyout::new(cc, anchor, passive) {
             Ok(app) => Ok(Box::new(app) as Box<dyn eframe::App>),
             Err(e) => Err(e.into()),
         }),
-    );
-    tray::stop();
-    result.map_err(|e| e.to_string())
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn main() {
@@ -130,6 +144,15 @@ fn main() {
     }
     sys::attach_console();
     let has = |a: &str| args.iter().any(|x| x == a);
+    if has("--flyout") {
+        let anchor =
+            args.iter().position(|x| x == "--flyout").and_then(|i| args.get(i + 1)).filter(|a| !a.starts_with("--"));
+        if let Err(e) = run_flyout(anchor.map(|s| s.as_str()), has("--passive")) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let result = if has("--version") {
         println!("Kamerton {}", env!("CARGO_PKG_VERSION"));
         Ok(())

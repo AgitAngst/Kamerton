@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, POINT, RECT};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, SetWindowRgn,
 };
@@ -12,10 +12,10 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowPos, ShowWindow,
+    AllowSetForegroundWindow, EnumWindows, GetWindowThreadProcessId, HWND_TOPMOST, PostMessageW, SW_SHOWNORMAL,
+    SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, WM_CLOSE,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
 
 use crate::placement::Rect;
 
@@ -56,30 +56,42 @@ pub fn hwnd(raw: isize) -> HWND {
     HWND(raw as *mut _)
 }
 
-/// Поставить окно и показать. `activate` — дать ему фокус (только по щелчку пользователя).
-pub fn show_at(raw: isize, x: i32, y: i32, w: i32, h: i32, activate: bool) {
-    let hwnd = hwnd(raw);
+/// Поставить окно (поверх всех), не показывая и не активируя.
+pub fn move_to(raw: isize, x: i32, y: i32, w: i32, h: i32) {
     unsafe {
-        let mut flags = SWP_SHOWWINDOW;
-        if !activate {
-            flags |= SWP_NOACTIVATE;
-        }
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, flags);
-        if activate {
-            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(hwnd);
-        }
+        let _ = SetWindowPos(hwnd(raw), Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
     }
 }
 
-pub fn hide(raw: isize) {
+/// Дать окну фокус — только когда его открыл щелчок пользователя.
+pub fn activate(raw: isize) {
     unsafe {
-        let _ = ShowWindow(hwnd(raw), SW_HIDE);
+        let _ = SetForegroundWindow(hwnd(raw));
     }
 }
 
-pub fn visible(raw: isize) -> bool {
-    unsafe { IsWindowVisible(hwnd(raw)).as_bool() }
+/// Попросить закрыться все окна процесса (`WM_CLOSE`).
+pub fn close_windows_of(pid: u32) {
+    unsafe extern "system" fn each(h: HWND, lparam: LPARAM) -> BOOL {
+        let mut owner = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(h, Some(&mut owner));
+            if owner == lparam.0 as u32 {
+                let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+        true.into()
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(pid as isize));
+    }
+}
+
+/// Разрешить процессу окна взять фокус: щелчок пришёл трею, а окно — другой процесс.
+pub fn allow_foreground(pid: u32) {
+    unsafe {
+        let _ = AllowSetForegroundWindow(pid);
+    }
 }
 
 /// Скруглить углы окна регионом: прозрачность окна OpenGL на Windows ненадёжна.

@@ -1,10 +1,8 @@
-// Выпадающее окно микшера: устройства вывода и их программы. Показ и прятание — Win32 по HWND окна
-// (`Shared`): спрятанное окно eframe не рисует и само не проснётся, поэтому показывает его поток трея.
-// Пока окно видно — каждый кадр снимок и уровни у ядра; спрятано — кадров нет вовсе.
+// Выпадающее окно микшера — отдельный процесс `kamerton --flyout`: трей запускает его по щелчку, а окно
+// закрывается (и процесс уходит) по Esc, щелчку мимо и повторному щелчку по значку. Так в покое живёт
+// только трей, без OpenGL. Пока окно открыто — каждый кадр снимок и уровни у своего ядра звука.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anvil_ui::Palette;
@@ -19,7 +17,6 @@ use crate::icons;
 use crate::placement::{self, Edge, Rect as PxRect};
 use crate::sys;
 use crate::texts::T;
-use crate::tray;
 
 /// Размеры окна и строк, логические пиксели (`docs/ui-guideline.md`).
 pub const WIDTH: f32 = 360.0;
@@ -38,8 +35,6 @@ const STEP: f32 = 0.02;
 const PAGE: f32 = 0.10;
 /// Сколько держать своё значение ползунка после движения, пока Windows не сообщила новое.
 const HOLD: Duration = Duration::from_millis(400);
-/// Окно спряталось из-за щелчка по значку — этот же щелчок не должен показать его снова.
-const REOPEN_GUARD_MS: u64 = 400;
 
 /// Устройства вывода: по умолчанию — первым.
 pub fn outputs(s: &Snapshot) -> Vec<&Device> {
@@ -68,122 +63,25 @@ struct Spot {
     scale: f32,
 }
 
-/// Общее у окна и трея: HWND окна, где оно стоит, когда пряталось, выход.
-pub struct Shared {
-    hwnd: AtomicIsize,
-    hidden_at: AtomicU64,
-    exiting: AtomicBool,
-    /// Окно открыто нами (щелчок по значку или `KAMERTON_OPEN`), а не показано eframe само.
-    opened: AtomicBool,
-    want_h: Mutex<f32>,
-    spot: Mutex<Option<Spot>>,
-    ctx: egui::Context,
-}
-
-impl Shared {
-    fn new(ctx: egui::Context, hwnd: isize, want_h: f32) -> Shared {
-        Shared {
-            hwnd: AtomicIsize::new(hwnd),
-            hidden_at: AtomicU64::new(0),
-            exiting: AtomicBool::new(false),
-            opened: AtomicBool::new(false),
-            want_h: Mutex::new(want_h),
-            spot: Mutex::new(None),
-            ctx,
-        }
-    }
-
-    fn hwnd(&self) -> isize {
-        self.hwnd.load(Ordering::SeqCst)
-    }
-
-    /// Щелчок по значку в трее.
-    pub fn toggle(&self, anchor: PxRect) {
-        let h = self.hwnd();
-        if h == 0 {
-            return;
-        }
-        if sys::visible(h) {
-            self.hide();
-        } else if sys::now_ms().saturating_sub(self.hidden_at.load(Ordering::SeqCst)) > REOPEN_GUARD_MS {
-            self.show(anchor);
-        }
-    }
-
-    /// Для снимков и проверок (`KAMERTON_OPEN=1`): показать у значка, не забирая фокус.
-    pub fn show_passive(&self, anchor: PxRect) {
-        self.opened.store(true, Ordering::SeqCst);
-        self.place_at(anchor);
-        self.layout(false);
-        self.ctx.request_repaint();
-    }
-
-    fn show(&self, anchor: PxRect) {
-        self.opened.store(true, Ordering::SeqCst);
-        self.place_at(anchor);
-        self.layout(true);
-        self.ctx.request_repaint();
-    }
-
-    fn place_at(&self, anchor: PxRect) {
-        let (mon, work, scale) = sys::monitor_at((anchor.left + anchor.right) / 2, (anchor.top + anchor.bottom) / 2);
-        let edge = placement::taskbar_edge(mon, work);
-        *self.spot.lock().unwrap() = Some(Spot { anchor, work, edge, scale });
-    }
-
-    /// Поставить окно по месту и желаемой высоте. `activate` — только при показе по щелчку.
-    fn layout(&self, activate: bool) {
-        let spot = self.spot.lock().unwrap();
-        let Some(s) = spot.as_ref() else { return };
-        let want_h = *self.want_h.lock().unwrap();
-        let w = (WIDTH * s.scale).round() as i32;
-        let gap = (placement::GAP * s.scale).round() as i32;
-        let (x, y, h) = placement::place(s.anchor, s.work, s.edge, (w, (want_h * s.scale).round() as i32), gap);
-        if std::env::var_os("KAMERTON_TRACE").is_some() {
-            eprintln!(
-                "trace: flyout at {x},{y} size {w}x{h}, anchor {:?}, edge {:?}, scale {}",
-                s.anchor, s.edge, s.scale
-            );
-        }
-        sys::show_at(self.hwnd(), x, y, w, h, activate);
-        sys::round_corners(self.hwnd(), w, h, (radius::WINDOW as f32 * s.scale).round() as i32);
-        if std::env::var_os("KAMERTON_TRACE").is_some() {
-            eprintln!("trace: flyout hwnd {:#x} visible {}", self.hwnd(), sys::visible(self.hwnd()));
-        }
-    }
-
-    fn hide(&self) {
-        self.opened.store(false, Ordering::SeqCst);
-        sys::hide(self.hwnd());
-        self.hidden_at.store(sys::now_ms(), Ordering::SeqCst);
-    }
-
-    /// «Выход» из меню трея: закрыть окно по-настоящему (обычно закрытие окна его только прячет).
-    pub fn exit(&self) {
-        self.exiting.store(true, Ordering::SeqCst);
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                Some(sys::hwnd(self.hwnd())),
-                windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(0),
-            );
-        }
-    }
-}
-
 pub struct Flyout {
     _audio: Audio,
     control: Control,
-    shared: Arc<Shared>,
+    hwnd: isize,
+    spot: Spot,
+    want_h: f32,
+    /// Открыто щелчком по значку: взять фокус и закрываться, когда он потерян. Без места значка
+    /// (`kamerton --flyout` для проверки) — фокус не трогать.
+    by_click: bool,
     was_focused: bool,
+    frames: u32,
     held: HashMap<Target, (f32, Instant)>,
     icons: HashMap<String, Option<TextureHandle>>,
-    frames: u32,
 }
 
 impl Flyout {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Flyout, String> {
+    /// `anchor` — прямоугольник значка в трее; `None` — угол рабочей области основного монитора.
+    /// `passive` — для проверки вида: не брать фокус и не закрываться без него.
+    pub fn new(cc: &eframe::CreationContext<'_>, anchor: Option<PxRect>, passive: bool) -> Result<Flyout, String> {
         let ctx = cc.egui_ctx.clone();
         let theme = match std::env::var("KAMERTON_THEME").ok().as_deref() {
             Some("light") => anvil_ui::ThemeChoice::Light,
@@ -194,23 +92,42 @@ impl Flyout {
         anvil_ui::motion::install(&ctx);
         let hwnd = anvil_ui::taskbar::window_handle(cc).ok_or("no window handle")?;
         let wake_ctx = ctx.clone();
-        let (audio, snapshot) = Audio::start_quiet(move || {
-            wake_ctx.request_repaint();
-            tray::refresh();
-        })
-        .map_err(|e| e.to_string())?;
-        let control = audio.control();
-        let shared = Arc::new(Shared::new(ctx, hwnd, content_height(&snapshot)));
-        tray::start(control.clone(), shared.clone());
+        let (audio, snapshot) = Audio::start_quiet(move || wake_ctx.request_repaint()).map_err(|e| e.to_string())?;
+        let by_click = anchor.is_some() && !passive;
+        let anchor = anchor.unwrap_or_else(|| {
+            let (_, work, _) = sys::monitor_at(0, 0);
+            PxRect { left: work.right - 1, top: work.bottom - 1, right: work.right, bottom: work.bottom }
+        });
+        let (mon, work, scale) = sys::monitor_at((anchor.left + anchor.right) / 2, (anchor.top + anchor.bottom) / 2);
+        let spot = Spot { anchor, work, edge: placement::taskbar_edge(mon, work), scale };
         Ok(Flyout {
+            control: audio.control(),
             _audio: audio,
-            control,
-            shared,
+            hwnd,
+            spot,
+            want_h: content_height(&snapshot),
+            by_click,
             was_focused: false,
+            frames: 0,
             held: HashMap::new(),
             icons: HashMap::new(),
-            frames: 0,
         })
+    }
+
+    /// Поставить окно по месту и желаемой высоте. Показывает его eframe после первого кадра.
+    fn layout(&self) {
+        let s = &self.spot;
+        let w = (WIDTH * s.scale).round() as i32;
+        let gap = (placement::GAP * s.scale).round() as i32;
+        let (x, y, h) = placement::place(s.anchor, s.work, s.edge, (w, (self.want_h * s.scale).round() as i32), gap);
+        if std::env::var_os("KAMERTON_TRACE").is_some() {
+            eprintln!(
+                "trace: flyout at {x},{y} size {w}x{h}, anchor {:?}, edge {:?}, scale {}",
+                s.anchor, s.edge, s.scale
+            );
+        }
+        sys::move_to(self.hwnd, x, y, w, h);
+        sys::round_corners(self.hwnd, w, h, (radius::WINDOW as f32 * s.scale).round() as i32);
     }
 
     fn shown_value(&mut self, target: &Target, actual: f32) -> f32 {
@@ -248,37 +165,29 @@ impl eframe::App for Flyout {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
-        // eframe показал окно сам (первый кадр) — спрятать: открывает его только щелчок по значку.
-        if !self.shared.opened.load(Ordering::SeqCst) {
-            sys::hide(self.shared.hwnd());
-            return;
-        }
         anvil_ui::motion::tick(ctx);
-        // Закрытие окна (Alt+F4) только прячет его; закрывает программу лишь «Выход» в трее.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.shared.exiting.load(Ordering::SeqCst) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.shared.hide();
-            return;
+        self.frames += 1;
+        if self.frames == 1 {
+            // Окно создано за экраном; eframe покажет его после этого кадра — уже на месте.
+            self.layout();
+            ctx.request_repaint();
+        } else if self.frames == 2 && self.by_click {
+            sys::activate(self.hwnd);
         }
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
-        if (self.was_focused && !focused) || ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.was_focused = false;
-            self.shared.hide();
+        let lost = self.by_click && self.was_focused && !focused;
+        if lost || ctx.input(|i| i.key_pressed(Key::Escape)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        self.was_focused = focused;
+        self.was_focused |= focused;
 
         let Ok(snapshot) = self.control.snapshot() else { return };
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
         let want = content_height(&snapshot);
-        let changed = {
-            let mut w = self.shared.want_h.lock().unwrap();
-            let c = (*w - want).abs() > 0.5;
-            *w = want;
-            c
-        };
-        if changed {
-            self.shared.layout(false);
+        if (self.want_h - want).abs() > 0.5 {
+            self.want_h = want;
+            self.layout();
         }
 
         let p = Palette::of_ctx(ctx);
@@ -325,9 +234,10 @@ impl eframe::App for Flyout {
             });
             if let Some(image) = shot {
                 crate::snap::save(&path, &image);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        // Уровни живые, пока окно видно; спрятанное окно кадров не получает.
+        // Уровни живые, пока окно открыто.
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 }

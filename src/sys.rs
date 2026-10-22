@@ -3,8 +3,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, SetWindowRgn,
+    CreateRoundRectRgn, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    SetWindowRgn,
 };
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -12,8 +14,8 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, EnumWindows, GetWindowThreadProcessId, HWND_TOPMOST, PostMessageW, SW_SHOWNORMAL,
-    SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, WM_CLOSE,
+    HWND_TOPMOST, PostMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WM_CLOSE,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -63,34 +65,44 @@ pub fn move_to(raw: isize, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
+/// Плащ DWM: окно остаётся «показанным» (рисуется), но его не видно. Так окно проявляется мгновенно.
+pub fn cloak(raw: isize, on: bool) {
+    let v: BOOL = on.into();
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd(raw), DWMWA_CLOAK, &v as *const BOOL as *const _, size_of::<BOOL>() as u32);
+    }
+}
+
+/// Показать окно, не давая фокус (под плащом — невидимо, но ему снова идёт WM_PAINT).
+pub fn show_noactivate(raw: isize) {
+    unsafe {
+        let _ = ShowWindow(hwnd(raw), SW_SHOWNOACTIVATE);
+    }
+}
+
+/// Попросить у Windows перерисовку окна (WM_PAINT) напрямую, из любого потока.
+pub fn invalidate(raw: isize) {
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd(raw)), None, false);
+    }
+}
+
+pub fn hide(raw: isize) {
+    unsafe {
+        let _ = ShowWindow(hwnd(raw), SW_HIDE);
+    }
+}
+
+pub fn post_close(raw: isize) {
+    unsafe {
+        let _ = PostMessageW(Some(hwnd(raw)), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+}
+
 /// Дать окну фокус — только когда его открыл щелчок пользователя.
 pub fn activate(raw: isize) {
     unsafe {
         let _ = SetForegroundWindow(hwnd(raw));
-    }
-}
-
-/// Попросить закрыться все окна процесса (`WM_CLOSE`).
-pub fn close_windows_of(pid: u32) {
-    unsafe extern "system" fn each(h: HWND, lparam: LPARAM) -> BOOL {
-        let mut owner = 0u32;
-        unsafe {
-            GetWindowThreadProcessId(h, Some(&mut owner));
-            if owner == lparam.0 as u32 {
-                let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-        }
-        true.into()
-    }
-    unsafe {
-        let _ = EnumWindows(Some(each), LPARAM(pid as isize));
-    }
-}
-
-/// Разрешить процессу окна взять фокус: щелчок пришёл трею, а окно — другой процесс.
-pub fn allow_foreground(pid: u32) {
-    unsafe {
-        let _ = AllowSetForegroundWindow(pid);
     }
 }
 

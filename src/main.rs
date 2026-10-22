@@ -100,13 +100,27 @@ fn run_tray() -> Result<(), String> {
         return Ok(());
     };
     texts::init();
-    let (audio, _) = Audio::start_quiet(tray::refresh).map_err(|e| e.to_string())?;
-    tray::run(audio.control());
-    Ok(())
+    // Окно микшера живёт в этом же процессе с самого старта (спрятано под плащом): по щелчку оно
+    // только встаёт на место и проявляется.
+    shell::run(
+        shell::Config { title: "Kamerton", size: [flyout::WIDTH, 200.0] },
+        Box::new(|ctx, hwnd| {
+            let wake = ctx.clone();
+            let (audio, snapshot) = Audio::start_quiet(move || {
+                tray::refresh();
+                wake.request_repaint();
+            })
+            .map_err(|e| e.to_string())?;
+            let shared = std::sync::Arc::new(flyout::Shared::new(ctx.clone(), hwnd));
+            tray::start(audio.control(), shared.clone());
+            let want_h = flyout::content_height(&snapshot);
+            Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, want_h, shared)) as Box<dyn shell::Content>)
+        }),
+    )
 }
 
-/// Окно микшера — свой процесс: трей запускает его по щелчку, окно закрывается — процесс уходит.
-/// `anchor` — «left,top,right,bottom» значка в трее; без него — угол основного монитора (проверка).
+/// Окно микшера отдельным процессом — для проверки вида (`--flyout --passive`).
+/// `anchor` — «left,top,right,bottom» значка в трее; без него — угол основного монитора.
 fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
     texts::init();
     let anchor = anchor.and_then(|a| {
@@ -116,7 +130,7 @@ fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
     shell::run(
         shell::Config { title: "Kamerton", size: [flyout::WIDTH, 200.0] },
         Box::new(move |ctx, hwnd| {
-            flyout::Flyout::new(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn shell::Content>)
+            flyout::Flyout::standalone(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn shell::Content>)
         }),
     )
 }

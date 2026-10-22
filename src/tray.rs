@@ -1,9 +1,9 @@
-// Значок в трее: главный поток процесса трея, невидимое окно сообщений. Щелчок — запустить окно микшера
-// (процесс `kamerton --flyout`) или закрыть его, правая кнопка — меню, колесо над значком — громкость
+// Значок в трее: свой поток с невидимым окном сообщений. Щелчок — открыть или закрыть окно микшера
+// (оно живёт в этом же процессе, `flyout::Shared`), правая кнопка — меню, колесо над значком — громкость
 // устройства по умолчанию (хук мыши), вид значка — уровень громкости глифом системного шрифта.
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -29,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::audio::{Control, Flow, model};
+use crate::flyout::Shared;
 use crate::placement::Rect;
 use crate::sys;
 use crate::texts::T;
@@ -53,14 +54,9 @@ static ICON_RECT: [AtomicI32; 4] = [AtomicI32::new(0), AtomicI32::new(0), Atomic
 
 struct Ctx {
     control: Control,
+    shared: Arc<Shared>,
     taskbar_created: u32,
 }
-
-/// Процесс окна микшера: pid (0 — не запущен) и когда он закрылся.
-static FLYOUT_PID: AtomicU32 = AtomicU32::new(0);
-static FLYOUT_CLOSED_AT: AtomicU64 = AtomicU64::new(0);
-/// Окно закрылось из-за щелчка по значку (потеряло фокус) — этот же щелчок не должен открыть его снова.
-const REOPEN_GUARD_MS: u64 = 400;
 
 static CTX: OnceLock<Ctx> = OnceLock::new();
 
@@ -113,45 +109,16 @@ pub fn refresh() {
     }
 }
 
-/// Щелчок по значку: окно открыто — закрыть, нет — запустить у значка.
-fn toggle_flyout(anchor: Option<Rect>) {
-    let pid = FLYOUT_PID.load(Ordering::SeqCst);
-    if pid != 0 {
-        sys::close_windows_of(pid);
-        return;
-    }
-    if sys::now_ms().saturating_sub(FLYOUT_CLOSED_AT.load(Ordering::SeqCst)) < REOPEN_GUARD_MS {
-        return;
-    }
-    let Ok(exe) = std::env::current_exe() else { return };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--flyout");
-    if let Some(a) = anchor {
-        cmd.arg(format!("{},{},{},{}", a.left, a.top, a.right, a.bottom));
-    }
-    // Проверка вида (`KAMERTON_OPEN`): окно не берёт фокус и не закрывается, когда его нет.
-    if std::env::var_os("KAMERTON_OPEN").is_some() {
-        cmd.arg("--passive");
-    }
-    let Ok(mut child) = cmd.spawn() else {
-        eprintln!("tray: cannot start flyout");
-        return;
-    };
-    // Щелчок пришёл трею — передать окну право взять фокус.
-    sys::allow_foreground(child.id());
-    FLYOUT_PID.store(child.id(), Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let _ = child.wait();
-        FLYOUT_CLOSED_AT.store(sys::now_ms(), Ordering::SeqCst);
-        FLYOUT_PID.store(0, Ordering::SeqCst);
-    });
+/// Запустить поток трея.
+pub fn start(control: Control, shared: Arc<Shared>) {
+    let _ = std::thread::Builder::new().name("tray".into()).spawn(move || run(control, shared));
 }
 
-/// Значок и цикл сообщений трея на текущем потоке; возвращается после «Выхода».
-pub fn run(control: Control) {
+/// Значок и цикл сообщений трея; возвращается после «Выхода».
+fn run(control: Control, shared: Arc<Shared>) {
     unsafe {
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
-        let _ = CTX.set(Ctx { control, taskbar_created });
+        let _ = CTX.set(Ctx { control, shared, taskbar_created });
         let instance = GetModuleHandleW(None).unwrap_or_default();
         let class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
@@ -184,8 +151,22 @@ pub fn run(control: Control) {
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!("trace: tray icon rect {:?}", icon_rect(hwnd));
         }
-        if std::env::var_os("KAMERTON_OPEN").is_some() {
-            toggle_flyout(icon_rect(hwnd));
+        // Проверка вида: открыть окно у значка сразу, без фокуса.
+        if std::env::var_os("KAMERTON_OPEN").is_some()
+            && let Some(r) = icon_rect(hwnd)
+        {
+            let shared = CTX.get().expect("tray context").shared.clone();
+            // `KAMERTON_OPEN=2` — открыть через 2 с и ещё раз через 4 с (замер открытия после прогрева).
+            if std::env::var("KAMERTON_OPEN").as_deref() == Ok("2") {
+                std::thread::spawn(move || {
+                    for _ in 0..2 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        shared.open(r, false);
+                    }
+                });
+            } else {
+                shared.open(r, false);
+            }
         }
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), Some(instance.into()), 0).ok();
         let mut msg = MSG::default();
@@ -438,7 +419,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 match event {
                     NIN_SELECT | NIN_KEYSELECT => {
                         let anchor = icon_rect(hwnd).unwrap_or(Rect { left: x, top: y, right: x + 1, bottom: y + 1 });
-                        toggle_flyout(Some(anchor));
+                        ctx.shared.toggle(anchor);
                     }
                     WM_CONTEXTMENU => show_menu(hwnd, x, y),
                     WM_MOUSEMOVE => update_rect(hwnd),
@@ -471,10 +452,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // Значок убрать до выхода, иначе в трее остаётся «призрак» до наведения мыши.
                 let d = base_data(hwnd);
                 let _ = Shell_NotifyIconW(NIM_DELETE, &d);
-                let pid = FLYOUT_PID.load(Ordering::SeqCst);
-                if pid != 0 {
-                    sys::close_windows_of(pid);
-                }
+                ctx.shared.exit();
                 PostQuitMessage(0);
                 LRESULT(0)
             }

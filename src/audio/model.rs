@@ -230,6 +230,13 @@ impl Snapshot {
     }
 }
 
+/// Громкость после шага колеса или клавиши: в пределах 0..1 и по сетке шага, чтобы 2 % × 3 давали
+/// ровно 6 %, а не 5.9999.
+pub fn step(now: f32, delta: f32) -> f32 {
+    let v = ((now + delta).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+    v.clamp(0.0, 1.0)
+}
+
 pub fn percent(v: f32) -> u32 {
     (v.clamp(0.0, 1.0) * 100.0).round() as u32
 }
@@ -391,6 +398,18 @@ mod tests {
             s.apply(&e);
         }
         assert_eq!(s, new);
+    }
+
+    #[test]
+    fn step_keeps_grid_and_limits() {
+        let mut v = 0.5;
+        for _ in 0..3 {
+            v = step(v, -0.02);
+        }
+        assert_eq!(v, 0.44);
+        assert_eq!(step(0.99, 0.02), 1.0);
+        assert_eq!(step(0.01, -0.02), 0.0);
+        assert_eq!(step(0.333, 0.02), 0.35);
     }
 
     #[test]

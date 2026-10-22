@@ -1,7 +1,18 @@
-// Kamerton — микшер громкости в трее. Пока есть только ядро звука и консольные режимы проверки
-// (`--list`, `--watch`); трей и окно — этап 0.2 в SPEC.md.
+// Kamerton — микшер громкости в трее. Без ключей — значок в трее и выпадающее окно; с ключами —
+// консольные режимы проверки ядра звука (`--list`, `--watch`).
+
+// В release-сборке своей консоли нет (программа живёт в трее); консольные ключи подключаются к консоли
+// родителя (`sys::attach_console`).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod flyout;
+mod icons;
+mod placement;
+mod snap;
+mod sys;
+mod texts;
+mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,6 +24,7 @@ use windows::core::BOOL;
 const HELP: &str = "Kamerton - tray volume mixer for Windows
 
 Usage:
+  kamerton                   run in the tray (one instance)
   kamerton --list            print devices and apps, then exit
   kamerton --watch [--peaks] [--for <s>]
                              print audio events until Ctrl+C or for <s> seconds
@@ -77,8 +89,46 @@ fn watch(peaks: bool, limit: Option<Duration>) -> Result<(), audio::AudioError> 
     Ok(())
 }
 
+/// Трей и окно. Второй экземпляр молча выходит.
+fn run_tray() -> Result<(), String> {
+    let Some(_instance) = sys::single_instance() else {
+        return Ok(());
+    };
+    texts::init();
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Kamerton")
+        .with_decorations(false)
+        .with_always_on_top()
+        .with_taskbar(false)
+        .with_resizable(false)
+        .with_visible(false)
+        // eframe сам показывает окно после первого кадра — пусть это будет за пределами экранов;
+        // на втором кадре окно прячется (`Flyout::ui`).
+        .with_position([-32000.0, -32000.0])
+        .with_inner_size([flyout::WIDTH, 200.0]);
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
+    let result = eframe::run_native(
+        "Kamerton",
+        options,
+        Box::new(|cc| match flyout::Flyout::new(cc) {
+            Ok(app) => Ok(Box::new(app) as Box<dyn eframe::App>),
+            Err(e) => Err(e.into()),
+        }),
+    );
+    tray::stop();
+    result.map_err(|e| e.to_string())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        if let Err(e) = run_tray() {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    sys::attach_console();
     let has = |a: &str| args.iter().any(|x| x == a);
     let result = if has("--version") {
         println!("Kamerton {}", env!("CARGO_PKG_VERSION"));
@@ -86,13 +136,13 @@ fn main() {
     } else if has("--list") {
         Audio::start(|| {}).map(|(_, s)| print_snapshot(&s))
     } else if has("--watch") {
-        let limit = args
-            .iter()
-            .position(|x| x == "--for")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs);
-        watch(has("--peaks"), limit)
+        match args.iter().position(|x| x == "--for").map(|i| args.get(i + 1).and_then(|v| v.parse::<u64>().ok())) {
+            Some(None) => {
+                eprintln!("error: --for needs a number of seconds");
+                std::process::exit(2);
+            }
+            limit => watch(has("--peaks"), limit.flatten().map(Duration::from_secs)),
+        }
     } else {
         println!("{HELP}");
         Ok(())

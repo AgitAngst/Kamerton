@@ -611,6 +611,22 @@ impl Engine {
         }
     }
 
+    /// Сдвинуть громкость устройства вывода по умолчанию. Текущую громкость читаем у Windows, а не из
+    /// снимка: при быстрой прокрутке колеса снимок ещё не успел обновиться.
+    pub fn adjust_default(&self, delta: f32) -> Result<f32, AudioError> {
+        let h = self
+            .devices
+            .iter()
+            .find(|h| h.info.flow == Flow::Render && h.info.is_default)
+            .ok_or(AudioError::NotFound)?;
+        unsafe {
+            let now = h.volume.GetMasterVolumeLevelScalar().map_err(win)?;
+            let level = model::step(now, delta);
+            h.volume.SetMasterVolumeLevelScalar(level, std::ptr::null()).map_err(win)?;
+            Ok(level)
+        }
+    }
+
     pub fn set_muted(&self, target: &Target, muted: bool) -> Result<(), AudioError> {
         match target {
             Target::Device(id) => unsafe { self.device(id)?.volume.SetMute(muted, std::ptr::null()).map_err(win) },

@@ -46,7 +46,10 @@ type Reply<T> = Sender<T>;
 pub(crate) enum Command {
     SetVolume(Target, f32, Reply<Result<(), AudioError>>),
     SetMuted(Target, bool, Reply<Result<(), AudioError>>),
+    /// Сдвинуть громкость устройства вывода по умолчанию; ответ — новая громкость.
+    AdjustDefault(f32, Reply<Result<f32, AudioError>>),
     Peaks(Reply<Vec<(Target, f32)>>),
+    Snapshot(Reply<Snapshot>),
 }
 
 /// Сообщение потоку звука: метка «перечитай» от Windows, команда или выход.
@@ -103,16 +106,33 @@ impl Marks {
 
 /// Ядро звука. Остановка — при удалении.
 pub struct Audio {
-    tx: Sender<Msg>,
+    control: Control,
     events: Receiver<Event>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// Команды ядру из любого потока (трей, окно). Копируется дёшево; ядро живёт, пока жив `Audio`.
+#[derive(Clone)]
+pub struct Control {
+    tx: Sender<Msg>,
 }
 
 impl Audio {
     /// Запустить поток звука. `wake` зовётся из него после каждой пачки событий (окну — перерисоваться).
     pub fn start(wake: impl Fn() + Send + 'static) -> Result<(Audio, Snapshot), AudioError> {
+        Self::start_with(wake, true)
+    }
+
+    /// То же без очереди событий: для окна, которое само спрашивает снимок, пока видно. Иначе, пока
+    /// окно спрятано и не читает очередь, события копились бы в ней.
+    pub fn start_quiet(wake: impl Fn() + Send + 'static) -> Result<(Audio, Snapshot), AudioError> {
+        Self::start_with(wake, false)
+    }
+
+    fn start_with(wake: impl Fn() + Send + 'static, with_events: bool) -> Result<(Audio, Snapshot), AudioError> {
         let (tx, rx) = channel();
         let (etx, erx) = channel();
+        let etx = with_events.then_some(etx);
         let (ready_tx, ready_rx) = channel();
         let inner = tx.clone();
         let thread = std::thread::Builder::new()
@@ -120,40 +140,68 @@ impl Audio {
             .spawn(move || run(inner, rx, etx, Box::new(wake), ready_tx))
             .map_err(|e| AudioError::Windows(e.to_string()))?;
         let snapshot = ready_rx.recv().map_err(|_| AudioError::Stopped)??;
-        Ok((Audio { tx, events: erx, thread: Some(thread) }, snapshot))
+        Ok((Audio { control: Control { tx }, events: erx, thread: Some(thread) }, snapshot))
     }
 
-    /// События ядра по порядку.
+    /// События ядра по порядку (пусто у `start_quiet`).
     pub fn events(&self) -> &Receiver<Event> {
         &self.events
     }
 
+    pub fn control(&self) -> Control {
+        self.control.clone()
+    }
+
+    /// Громкость 0..1 устройству или программе (всем её сессиям).
+    #[allow(dead_code)] // консоль только читает; окно зовёт через `Control`
+    pub fn set_volume(&self, target: Target, level: f32) -> Result<(), AudioError> {
+        self.control.set_volume(target, level)
+    }
+
+    #[allow(dead_code)] // консоль только читает; окно зовёт через `Control`
+    pub fn set_muted(&self, target: Target, muted: bool) -> Result<(), AudioError> {
+        self.control.set_muted(target, muted)
+    }
+
+    /// Текущие пиковые уровни 0..1.
+    pub fn peaks(&self) -> Vec<(Target, f32)> {
+        self.control.peaks()
+    }
+}
+
+impl Control {
     fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, AudioError> {
         let (rtx, rrx) = channel();
         self.tx.send(Msg::Do(make(rtx))).map_err(|_| AudioError::Stopped)?;
         rrx.recv().map_err(|_| AudioError::Stopped)
     }
 
-    /// Громкость 0..1 устройству или программе (всем её сессиям).
-    #[allow(dead_code)] // зовёт окно этапа 0.2; консоль только читает
     pub fn set_volume(&self, target: Target, level: f32) -> Result<(), AudioError> {
         self.ask(|r| Command::SetVolume(target, level, r))?
     }
 
-    #[allow(dead_code)] // зовёт окно этапа 0.2; консоль только читает
     pub fn set_muted(&self, target: Target, muted: bool) -> Result<(), AudioError> {
         self.ask(|r| Command::SetMuted(target, muted, r))?
     }
 
-    /// Текущие пиковые уровни 0..1.
+    /// Сдвинуть громкость устройства вывода по умолчанию на `delta` (−1..1); ответ — новая 0..1.
+    pub fn adjust_default(&self, delta: f32) -> Result<f32, AudioError> {
+        self.ask(|r| Command::AdjustDefault(delta, r))?
+    }
+
     pub fn peaks(&self) -> Vec<(Target, f32)> {
         self.ask(Command::Peaks).unwrap_or_default()
+    }
+
+    /// Снимок «как сейчас».
+    pub fn snapshot(&self) -> Result<Snapshot, AudioError> {
+        self.ask(Command::Snapshot)
     }
 }
 
 impl Drop for Audio {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Quit);
+        let _ = self.control.tx.send(Msg::Quit);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -163,7 +211,7 @@ impl Drop for Audio {
 fn run(
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
-    events: Sender<Event>,
+    events: Option<Sender<Event>>,
     wake: Box<dyn Fn() + Send>,
     ready: Sender<Result<Snapshot, AudioError>>,
 ) {
@@ -216,8 +264,10 @@ fn run(
         let changes = model::diff(&last, &now);
         last = now;
         if !changes.is_empty() {
-            for e in changes {
-                let _ = events.send(e);
+            if let Some(events) = &events {
+                for e in changes {
+                    let _ = events.send(e);
+                }
             }
             wake();
         }
@@ -242,8 +292,14 @@ fn handle(engine: &mut win::Engine, msg: Msg, marks: &mut Marks) -> bool {
         Msg::Do(Command::SetMuted(t, m, r)) => {
             let _ = r.send(engine.set_muted(&t, m));
         }
+        Msg::Do(Command::AdjustDefault(d, r)) => {
+            let _ = r.send(engine.adjust_default(d));
+        }
         Msg::Do(Command::Peaks(r)) => {
             let _ = r.send(engine.peaks());
+        }
+        Msg::Do(Command::Snapshot(r)) => {
+            let _ = r.send(engine.snapshot());
         }
         Msg::Quit => return false,
         Msg::Devices | Msg::Device(_) | Msg::Sessions => {}

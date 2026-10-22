@@ -30,8 +30,34 @@ pub trait Content {
 
 pub struct Config {
     pub title: &'static str,
-    /// Логический размер при создании; дальше окно ставит содержимое само.
+    /// Логический размер при создании.
     pub size: [f32; 2],
+    pub decorations: bool,
+    pub resizable: bool,
+    pub always_on_top: bool,
+    /// Без кнопки на панели задач.
+    pub skip_taskbar: bool,
+    /// Где создать, физические пиксели; `None` — где решит система.
+    pub position: Option<[i32; 2]>,
+    /// Давать окну фокус при показе.
+    pub active: bool,
+}
+
+impl Config {
+    /// Всплывающее окно: без рамки, поверх всех, без кнопки на панели задач, создаётся за экранами —
+    /// место ставит содержимое на первом кадре.
+    pub fn popup(title: &'static str, size: [f32; 2]) -> Config {
+        Config {
+            title,
+            size,
+            decorations: false,
+            resizable: false,
+            always_on_top: true,
+            skip_taskbar: true,
+            position: Some([-32000, -32000]),
+            active: false,
+        }
+    }
 }
 
 type Make = Box<dyn FnOnce(&egui::Context, isize) -> Result<Box<dyn Content>, String>>;
@@ -150,16 +176,21 @@ impl ApplicationHandler<Wake> for Shell {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title(self.config.title)
-            .with_decorations(false)
-            .with_resizable(false)
+        let c = &self.config;
+        let mut attrs = Window::default_attributes()
+            .with_title(c.title)
+            .with_decorations(c.decorations)
+            .with_resizable(c.resizable)
             .with_visible(false)
-            .with_window_level(WindowLevel::AlwaysOnTop)
-            // Создаётся за экранами: место ставит содержимое на первом кадре.
-            .with_position(PhysicalPosition::new(-32000, -32000))
-            .with_inner_size(LogicalSize::new(self.config.size[0], self.config.size[1]))
-            .with_skip_taskbar(true);
+            .with_inner_size(LogicalSize::new(c.size[0], c.size[1]))
+            .with_skip_taskbar(c.skip_taskbar)
+            .with_active(c.active);
+        if c.always_on_top {
+            attrs = attrs.with_window_level(WindowLevel::AlwaysOnTop);
+        }
+        if let Some([x, y]) = c.position {
+            attrs = attrs.with_position(PhysicalPosition::new(x, y));
+        }
         let window = match el.create_window(attrs) {
             Ok(w) => w,
             Err(e) => return self.fail(el, e.to_string()),

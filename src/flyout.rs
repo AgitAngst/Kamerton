@@ -16,7 +16,7 @@ use eframe::egui::{
 };
 
 use crate::audio::{App, AppKey, Audio, Control, Device, Flow, Roles, Snapshot, Target, model};
-use crate::config::Settings;
+use crate::config::{LangPref, Settings, ThemePref};
 use crate::hotkeys::{Action, AppAction, Combo};
 use crate::icons;
 use crate::placement::{self, Edge, Rect as PxRect};
@@ -44,6 +44,12 @@ const STEP: f32 = 0.02;
 const PAGE: f32 = 0.10;
 /// Сколько держать своё значение ползунка после движения, пока Windows не сообщила новое.
 const HOLD: Duration = Duration::from_millis(400);
+/// Въезд окна при открытии: расстояние и время (`docs/ui-guideline.md`, «Движение»).
+const SLIDE_PX: f32 = 12.0;
+/// Окно микшера: ширина колонки устройства и строка баланса.
+const MIXER_COLUMN: f32 = 340.0;
+const BALANCE_ROW: f32 = 40.0;
+const SLIDE_SECS: f32 = 0.18;
 /// Окно закрылось — щелчок по значку в эти мс его не открывает: это тот же щелчок, что снял фокус.
 const REOPEN_GUARD_MS: u64 = 300;
 
@@ -157,11 +163,15 @@ pub struct Shared {
     pub hotkey_free: Mutex<HashMap<String, bool>>,
     /// Окно записывает сочетание: трей снимает свои, чтобы нажатие дошло до окна.
     pub capturing: AtomicBool,
+    /// Колесо вне открытого окна меняет громкость — копия настройки для хука мыши (без блокировки).
+    pub wheel_outside: AtomicBool,
 }
 
 impl Shared {
     pub fn new(ctx: egui::Context, hwnd: isize) -> Shared {
-        Shared {
+        let settings = Settings::load();
+        let wheel = settings.wheel_outside;
+        let s = Shared {
             hwnd: AtomicIsize::new(hwnd),
             state: AtomicU8::new(HIDDEN),
             hidden_at: AtomicU64::new(0),
@@ -169,10 +179,27 @@ impl Shared {
             close: AtomicBool::new(false),
             exiting: AtomicBool::new(false),
             ctx,
-            settings: Mutex::new(Settings::load()),
+            settings: Mutex::new(settings),
             hotkey_free: Mutex::new(HashMap::new()),
             capturing: AtomicBool::new(false),
-        }
+            wheel_outside: AtomicBool::new(false),
+        };
+        s.wheel_outside.store(wheel, Ordering::SeqCst);
+        s
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == OPEN
+    }
+
+    pub fn hwnd(&self) -> isize {
+        self.hwnd.load(Ordering::SeqCst)
+    }
+
+    /// Снимок без скрытого пользователем.
+    pub fn visible(&self, s: &Snapshot) -> Snapshot {
+        let st = self.settings.lock().unwrap();
+        model::visible(s, &st.hidden_apps, &st.hidden_devices)
     }
 
     pub fn request_repaint(&self) {
@@ -248,25 +275,46 @@ pub struct Flyout {
     capture: Option<Slot>,
     /// Высота страницы настроек по прошлому кадру.
     page_h: f32,
+    /// Начало въезда окна; `None` — окно на месте.
+    slide: Option<Instant>,
+    /// Полный снимок (со скрытым) — для раздела «Скрытое».
+    all: Snapshot,
+    /// Это окно микшера (`--mixer`): обычное окно, устройства колонками.
+    mixer: bool,
     /// Блоки устройств на этом кадре — цели перетаскивания.
     targets: Vec<(String, Flow, Rect)>,
 }
 
-fn install_look(ctx: &egui::Context) {
-    let theme = match std::env::var("KAMERTON_THEME").ok().as_deref() {
-        Some("light") => anvil_ui::ThemeChoice::Light,
-        Some("dark") => anvil_ui::ThemeChoice::Dark,
-        _ => anvil_ui::ThemeChoice::System,
-    };
-    anvil_ui::install(ctx, anvil_ui::Accent::BLUE, theme);
+/// Тема из настроек; `KAMERTON_THEME` (проверка вида) важнее.
+fn theme_choice(pref: ThemePref) -> anvil_ui::ThemeChoice {
+    match std::env::var("KAMERTON_THEME").ok().as_deref() {
+        Some("light") => return anvil_ui::ThemeChoice::Light,
+        Some("dark") => return anvil_ui::ThemeChoice::Dark,
+        _ => {}
+    }
+    match pref {
+        ThemePref::System => anvil_ui::ThemeChoice::System,
+        ThemePref::Light => anvil_ui::ThemeChoice::Light,
+        ThemePref::Dark => anvil_ui::ThemeChoice::Dark,
+    }
+}
+
+fn kit_lang() -> anvil_ui::Lang {
+    if crate::texts::english() { anvil_ui::Lang::En } else { anvil_ui::Lang::Ru }
+}
+
+fn install_look(ctx: &egui::Context, settings: &Settings) {
+    crate::texts::apply(settings.lang);
+    anvil_ui::install(ctx, anvil_ui::Accent::BLUE, theme_choice(settings.theme));
+    anvil_ui::lang::set_language(ctx, kit_lang());
     anvil_ui::motion::install(ctx);
 }
 
 impl Flyout {
     /// Окно в процессе трея: создаётся при старте спрятанным под плащом и ждёт щелчка.
     pub fn in_tray(ctx: &egui::Context, hwnd: isize, audio: Audio, snapshot: &Snapshot, shared: Arc<Shared>) -> Flyout {
-        install_look(ctx);
         sys::cloak(hwnd, true);
+        install_look(ctx, &shared.settings.lock().unwrap());
         let mut f = Flyout::make(audio, hwnd, shared, false, 0.0);
         f.want_h = content_height(snapshot, f.shared.expanded());
         f
@@ -280,7 +328,6 @@ impl Flyout {
         anchor: Option<PxRect>,
         passive: bool,
     ) -> Result<Flyout, String> {
-        install_look(ctx);
         let wake_ctx = ctx.clone();
         let (audio, snapshot) = Audio::start_quiet(move || wake_ctx.request_repaint()).map_err(|e| e.to_string())?;
         let by_click = anchor.is_some() && !passive;
@@ -289,6 +336,7 @@ impl Flyout {
             PxRect { left: work.right - 1, top: work.bottom - 1, right: work.right, bottom: work.bottom }
         });
         let shared = Arc::new(Shared::new(ctx.clone(), hwnd));
+        install_look(ctx, &shared.settings.lock().unwrap());
         *shared.pending.lock().unwrap() = Some((anchor, by_click));
         shared.state.store(OPENING, Ordering::SeqCst);
         let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
@@ -297,6 +345,7 @@ impl Flyout {
         match std::env::var("KAMERTON_PAGE").as_deref() {
             Ok("hotkeys") => f.page = Page::Hotkeys,
             Ok("profiles") => f.page = Page::Profiles,
+            Ok("settings") => f.page = Page::Settings,
             _ => {}
         }
         if f.page != Page::Mixer {
@@ -327,16 +376,143 @@ impl Flyout {
             capture: None,
             // Пока страница не нарисована ни разу — примерная высота, чтобы не мигнуть крошечным окном.
             page_h: 460.0,
+            slide: None,
+            all: Snapshot::default(),
+            mixer: false,
             targets: Vec::new(),
         }
     }
 
-    /// Поставить окно по месту и желаемой высоте.
+    /// Окно микшера (`kamerton --mixer`): обычное окно, все устройства колонками.
+    pub fn mixer_window(ctx: &egui::Context, hwnd: isize) -> Result<Flyout, String> {
+        let wake_ctx = ctx.clone();
+        let (audio, _) = Audio::start_quiet(move || wake_ctx.request_repaint()).map_err(|e| e.to_string())?;
+        let shared = Arc::new(Shared::new(ctx.clone(), hwnd));
+        install_look(ctx, &shared.settings.lock().unwrap());
+        if let Some(r) = shared.settings.lock().unwrap().mixer_rect
+            && std::env::var_os("KAMERTON_SNAP").is_none()
+        {
+            sys::place_normal(hwnd, r);
+        }
+        shared.state.store(OPEN, Ordering::SeqCst);
+        let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
+        f.mixer = true;
+        Ok(f)
+    }
+
+    /// Окно микшера: колонка на устройство — строка устройства, баланс, программы.
+    fn mixer_ui(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let Ok(all) = self.control.snapshot() else { return };
+        let snapshot = self.shared.visible(&all);
+        self.all = all;
+        let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
+        let p = Palette::of_ctx(&ctx);
+        self.targets.clear();
+        let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(16));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(12.0, 0.0);
+                    let mut devs: Vec<&Device> = outputs(&snapshot);
+                    devs.extend(of_flow(&snapshot, Flow::Capture));
+                    for d in devs {
+                        ui.allocate_ui_with_layout(
+                            vec2(MIXER_COLUMN, ui.available_height()),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                anvil_ui::widgets::card(ui, |ui| {
+                                    ui.set_width(MIXER_COLUMN - 32.0);
+                                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                    let top = ui.cursor().top();
+                                    let peak = peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0);
+                                    self.device_row(ui, d, peak);
+                                    if let Some(b) = d.balance {
+                                        self.balance_row(ui, d, b);
+                                    }
+                                    let apps = shown_apps(d);
+                                    if apps.is_empty() {
+                                        note_row(ui, T::NoApps.get());
+                                    }
+                                    for a in apps {
+                                        let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
+                                        self.app_row(ui, a, d.flow, &snapshot, peak);
+                                    }
+                                    let block = Rect::from_min_max(
+                                        pos2(ui.min_rect().left(), top),
+                                        pos2(ui.min_rect().right(), ui.cursor().top()),
+                                    );
+                                    self.targets.push((d.id.clone(), d.flow, block));
+                                });
+                            },
+                        );
+                    }
+                });
+            });
+        });
+        self.finish_drag(&ctx);
+        if self.snap_check(&ctx) {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(33));
+    }
+
+    /// Баланс устройства: «Л» — ползунок — «П».
+    fn balance_row(&mut self, ui: &mut Ui, d: &Device, b: f32) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), BALANCE_ROW), Sense::hover());
+        let p = Palette::of(ui);
+        ui.painter().text(
+            pos2(rect.left(), rect.top() + 9.0),
+            Align2::LEFT_CENTER,
+            T::Balance.get(),
+            FontId::proportional(12.0),
+            p.weak,
+        );
+        let line = rect.top() + 26.0;
+        ui.painter().text(
+            pos2(rect.left(), line),
+            Align2::LEFT_CENTER,
+            T::BalanceL.get(),
+            FontId::proportional(12.0),
+            p.weak,
+        );
+        ui.painter().text(
+            pos2(rect.right() - 44.0, line),
+            Align2::LEFT_CENTER,
+            T::BalanceR.get(),
+            FontId::proportional(12.0),
+            p.weak,
+        );
+        let track = Rect::from_min_max(pos2(rect.left() + 14.0, line - 8.0), pos2(rect.right() - 52.0, line + 8.0));
+        // Ползунок окна работает с 0..1: 0 — Л, 0.5 — середина, 1 — П.
+        let target = Target::Device(format!("balance:{}", d.id));
+        let shown = self.shown_value(&target, (b + 1.0) / 2.0);
+        let out = slider(ui, ui.id().with(("balance", &d.id)), track, shown, false, 0.0);
+        if let Some(v) = out.value {
+            // Возле середины — ровно середина: так проще вернуть оба канала.
+            let v = if (v - 0.5).abs() < 0.03 { 0.5 } else { v };
+            self.held.insert(target, (v, Instant::now()));
+            let _ = self.control.set_balance(&d.id, v * 2.0 - 1.0);
+        }
+    }
+
+    /// Поставить окно по месту и желаемой высоте; во время въезда — со сдвигом от панели задач.
     fn layout(&self) {
         let Some(s) = &self.spot else { return };
         let w = (WIDTH * s.scale).round() as i32;
         let gap = (placement::GAP * s.scale).round() as i32;
-        let (x, y, h) = placement::place(s.anchor, s.work, s.edge, (w, (self.want_h * s.scale).round() as i32), gap);
+        let (mut x, mut y, h) =
+            placement::place(s.anchor, s.work, s.edge, (w, (self.want_h * s.scale).round() as i32), gap);
+        if let Some(start) = self.slide {
+            let t = (start.elapsed().as_secs_f32() / SLIDE_SECS).min(1.0);
+            let off = ((1.0 - anvil_ui::motion::curve::ease_out(t)) * SLIDE_PX * s.scale).round() as i32;
+            match s.edge {
+                Edge::Bottom => y += off,
+                Edge::Top => y -= off,
+                Edge::Left => x -= off,
+                Edge::Right => x += off,
+            }
+        }
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!(
                 "trace: flyout at {x},{y} size {w}x{h}, anchor {:?}, edge {:?}, scale {}",
@@ -394,7 +570,8 @@ impl Flyout {
 
 impl crate::shell::Content for Flyout {
     fn clear(&self, ctx: &egui::Context) -> Color32 {
-        Palette::of_ctx(ctx).card
+        let p = Palette::of_ctx(ctx);
+        if self.mixer { p.bg } else { p.card }
     }
 
     fn after_present(&mut self) {
@@ -419,6 +596,15 @@ impl crate::shell::Content for Flyout {
     }
 
     fn close_requested(&mut self) -> bool {
+        // Окно микшера: запомнить место и размер.
+        if self.mixer {
+            if let Some(r) = sys::window_rect(self.hwnd) {
+                let mut st = self.shared.settings.lock().unwrap();
+                st.mixer_rect = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
+                st.save();
+            }
+            return true;
+        }
         // Alt+F4 только прячет окно; закрывает программу «Выход» в трее.
         if self.standalone || self.shared.exiting.load(Ordering::SeqCst) {
             return true;
@@ -430,6 +616,12 @@ impl crate::shell::Content for Flyout {
     fn ui(&mut self, ui: &mut Ui) {
         let ctx = &ui.ctx().clone();
         anvil_ui::motion::tick(ctx);
+        let log = self.shared.settings.lock().unwrap().log_scale;
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("kamerton-log-scale"), log));
+        if self.mixer {
+            self.mixer_ui(ui);
+            return;
+        }
         let opening = self.shared.pending.lock().unwrap().take();
         if let Some((anchor, by_click)) = opening {
             self.spot = Some(Spot::at(anchor));
@@ -437,8 +629,10 @@ impl crate::shell::Content for Flyout {
             self.was_focused = false;
             self.frames = 0;
             self.reveal = true;
+            let animate = self.shared.settings.lock().unwrap().animate;
+            self.slide = (animate && anvil_ui::motion::pref::animations_enabled()).then(Instant::now);
             if let Ok(s) = self.control.snapshot() {
-                self.want_h = content_height(&s, self.shared.expanded());
+                self.want_h = content_height(&self.shared.visible(&s), self.shared.expanded());
             }
             self.layout();
         }
@@ -459,8 +653,17 @@ impl crate::shell::Content for Flyout {
         }
         self.was_focused |= focused;
 
-        let Ok(snapshot) = self.control.snapshot() else { return };
+        let Ok(all) = self.control.snapshot() else { return };
+        let snapshot = self.shared.visible(&all);
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
+        if let Some(start) = self.slide {
+            self.layout();
+            if start.elapsed().as_secs_f32() >= SLIDE_SECS {
+                self.slide = None;
+            }
+            ctx.request_repaint();
+        }
+        self.all = all;
         let want =
             if self.page != Page::Mixer { self.page_h } else { content_height(&snapshot, self.shared.expanded()) };
         if (self.want_h - want).abs() > 0.5 {
@@ -483,6 +686,7 @@ impl crate::shell::Content for Flyout {
                         .auto_shrink([false, false])
                         .show(ui, |ui| match self.page {
                             Page::Profiles => self.profiles_page(ui, &snapshot),
+                            Page::Settings => self.settings_page(ui),
                             _ => self.hotkeys_page(ui, &snapshot),
                         })
                         .content_size
@@ -568,6 +772,7 @@ enum Page {
     Mixer,
     Hotkeys,
     Profiles,
+    Settings,
 }
 
 /// Поле сочетания: общее действие или действие программы.
@@ -594,6 +799,7 @@ fn action_text(a: Action) -> &'static str {
         Action::Quieter => T::ActQuieter.get(),
         Action::Mute => T::Mute.get(),
         Action::NextOutput => T::ActNext.get(),
+        Action::Mixer => T::ActMixer.get(),
     }
 }
 
@@ -704,6 +910,123 @@ impl Flyout {
             self.start_capture(slot);
         }
         ui.add_space(4.0);
+    }
+
+    fn settings_page(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
+                self.page = Page::Mixer;
+            }
+            ui.label(egui::RichText::new(T::Settings.get()).font(anvil_ui::semibold(14.5)));
+        });
+        ui.add_space(6.0);
+        let mut st = self.shared.settings.lock().unwrap().clone();
+        let before = st.clone();
+
+        anvil_ui::widgets::section_label(ui, T::Appearance.get());
+        anvil_ui::chrome::setting_row(ui, T::Theme.get(), |ui| {
+            anvil_ui::widgets::segmented(
+                ui,
+                &mut st.theme,
+                &[
+                    (ThemePref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
+                    (ThemePref::Light, Some(anvil_ui::Icon::Sun), T::ThemeLight.get()),
+                    (ThemePref::Dark, Some(anvil_ui::Icon::Moon), T::ThemeDark.get()),
+                ],
+            );
+        });
+        anvil_ui::chrome::setting_row(ui, T::Language.get(), |ui| {
+            anvil_ui::widgets::segmented(
+                ui,
+                &mut st.lang,
+                &[
+                    (LangPref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
+                    (LangPref::Ru, None, "Русский"),
+                    (LangPref::En, None, "English"),
+                ],
+            );
+        });
+
+        ui.add_space(10.0);
+        anvil_ui::widgets::section_label(ui, T::WindowSection.get());
+        anvil_ui::widgets::switch(ui, &mut st.animate, T::Animation.get());
+        anvil_ui::widgets::switch(ui, &mut st.wheel_outside, T::WheelOutside.get());
+        anvil_ui::widgets::switch(ui, &mut st.log_scale, T::LogScale.get());
+
+        ui.add_space(10.0);
+        anvil_ui::widgets::section_label(ui, T::ThemeSystem.get());
+        let mut auto = sys::autostart();
+        if anvil_ui::widgets::switch(ui, &mut auto, T::Autostart.get()).changed() {
+            sys::set_autostart(auto);
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Secondary, None, T::Hotkeys.get()).clicked() {
+                self.page = Page::Hotkeys;
+            }
+            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Secondary, Some(anvil_ui::Icon::Layers), T::Profiles.get())
+                .clicked()
+            {
+                self.page = Page::Profiles;
+            }
+        });
+
+        ui.add_space(10.0);
+        anvil_ui::widgets::section_label(ui, T::Hidden.get());
+        if st.hidden_apps.is_empty() && st.hidden_devices.is_empty() {
+            anvil_ui::widgets::note(ui, T::NothingHidden.get());
+        }
+        let all = self.all.clone();
+        let mut show_app = None;
+        for exe in &st.hidden_apps {
+            let name = all
+                .devices
+                .iter()
+                .flat_map(|d| d.apps.iter())
+                .find(|a| &a.key.exe == exe)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_string());
+            anvil_ui::chrome::setting_row(ui, &name, |ui| {
+                if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
+                    show_app = Some(exe.clone());
+                }
+            });
+        }
+        let mut show_dev = None;
+        for id in &st.hidden_devices {
+            let name = all
+                .devices
+                .iter()
+                .find(|d| &d.id == id)
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| T::NotConnected.get().to_string());
+            anvil_ui::chrome::setting_row(ui, &name, |ui| {
+                if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
+                    show_dev = Some(id.clone());
+                }
+            });
+        }
+        if let Some(e) = show_app {
+            st.hidden_apps.remove(&e);
+        }
+        if let Some(d) = show_dev {
+            st.hidden_devices.remove(&d);
+        }
+
+        if st != before {
+            if st.theme != before.theme {
+                anvil_ui::choose(&ctx, theme_choice(st.theme));
+            }
+            if st.lang != before.lang {
+                crate::texts::apply(st.lang);
+                anvil_ui::lang::set_language(&ctx, kit_lang());
+            }
+            self.shared.wheel_outside.store(st.wheel_outside, Ordering::SeqCst);
+            st.save();
+            *self.shared.settings.lock().unwrap() = st;
+        }
     }
 
     fn profiles_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
@@ -898,7 +1221,7 @@ impl Flyout {
                     let g = ui
                         .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let g =
-                                anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Hotkeys.get()).clicked();
+                                anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Settings.get()).clicked();
                             if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Layers, T::Profiles.get()).clicked() {
                                 self.page = Page::Profiles;
                             }
@@ -915,7 +1238,7 @@ impl Flyout {
             s.save();
         }
         if gear {
-            self.page = Page::Hotkeys;
+            self.page = Page::Settings;
             self.focus_app = None;
         }
     }
@@ -963,6 +1286,12 @@ impl Flyout {
             let text = if d.muted { T::Unmute.get() } else { T::Mute.get() };
             if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
                 let _ = self.control.set_muted(target.clone(), !d.muted);
+                ui.close();
+            }
+            if anvil_ui::widgets::menu_item(ui, None, T::Hide.get(), None).clicked() {
+                let mut st = self.shared.settings.lock().unwrap();
+                st.hidden_devices.insert(d.id.clone());
+                st.save();
                 ui.close();
             }
         });
@@ -1031,6 +1360,12 @@ impl Flyout {
                 && anvil_ui::widgets::menu_item(ui, Some(anvil_ui::Icon::Gear), T::HotkeysMenu.get(), None).clicked()
             {
                 open_hotkeys = true;
+                ui.close();
+            }
+            if anvil_ui::widgets::menu_item(ui, None, T::Hide.get(), None).clicked() {
+                let mut st = self.shared.settings.lock().unwrap();
+                st.hidden_apps.insert(a.key.exe.clone());
+                st.save();
                 ui.close();
             }
             anvil_ui::widgets::menu_separator(ui);
@@ -1162,6 +1497,7 @@ struct SliderOut {
 /// (её меню).
 fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: f32) -> SliderOut {
     let p = Palette::of(ui);
+    let log = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("kamerton-log-scale"))).unwrap_or(false);
     let response = ui.interact(rect, id, Sense::drag());
     let track = Rect::from_min_max(
         pos2(rect.left() + 7.0, rect.center().y - 2.0),
@@ -1170,7 +1506,7 @@ fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: 
     let mut out = None;
     let pressed = response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
     if pressed && let Some(pos) = response.interact_pointer_pos() {
-        out = Some(model::step(((pos.x - track.left()) / track.width()).clamp(0.0, 1.0), 0.0));
+        out = Some(model::step(model::from_pos((pos.x - track.left()) / track.width(), log), 0.0));
         response.request_focus();
     }
     if response.has_focus() {
@@ -1214,18 +1550,20 @@ fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: 
         }
     }
     let v = out.unwrap_or(value);
+    // Положение на дорожке — по шкале; громкость и число — как есть.
+    let pos = model::to_pos(v, log);
     let fill = if muted { p.faint } else { p.accent };
     ui.painter().rect_filled(track, CornerRadius::same(2), p.raised);
-    let filled = Rect::from_min_max(track.min, pos2(track.left() + track.width() * v, track.bottom()));
+    let filled = Rect::from_min_max(track.min, pos2(track.left() + track.width() * pos, track.bottom()));
     ui.painter().rect_filled(filled, CornerRadius::same(2), fill);
     if !muted && peak > 0.0 {
         let line = Rect::from_min_max(
             pos2(track.left(), track.bottom() + 2.0),
-            pos2(track.left() + track.width() * peak.clamp(0.0, 1.0), track.bottom() + 4.0),
+            pos2(track.left() + track.width() * model::to_pos(peak, log), track.bottom() + 4.0),
         );
         ui.painter().rect_filled(line, CornerRadius::same(1), p.accent_text);
     }
-    let knob = pos2(track.left() + track.width() * v, track.center().y);
+    let knob = pos2(track.left() + track.width() * pos, track.center().y);
     let r = if response.hovered() || response.dragged() { 8.0 } else { 7.0 };
     ui.painter().circle(knob, r, fill, Stroke::new(2.0, p.card));
     if response.has_focus() {
@@ -1257,6 +1595,7 @@ mod tests {
             muted: false,
             is_default: default,
             is_comm: false,
+            balance: None,
             apps: (0..apps)
                 .map(|i| App {
                     key: AppKey { device: id.into(), exe: format!("{i}.exe") },

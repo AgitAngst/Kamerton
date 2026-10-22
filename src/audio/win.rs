@@ -369,6 +369,7 @@ impl DeviceHandle {
                 muted: false,
                 is_default: false,
                 is_comm: false,
+                balance: None,
                 apps: Vec::new(),
             };
             Ok(DeviceHandle { info, volume, volume_cb, meter, manager, new_cb, sessions: Vec::new() })
@@ -383,6 +384,15 @@ impl DeviceHandle {
             if let Ok(m) = self.volume.GetMute() {
                 self.info.muted = m.as_bool();
             }
+            // Баланс — только у стерео: два канала.
+            self.info.balance = match self.volume.GetChannelCount() {
+                Ok(2) => match (self.volume.GetChannelVolumeLevelScalar(0), self.volume.GetChannelVolumeLevelScalar(1))
+                {
+                    (Ok(l), Ok(r)) => Some(model::balance_of(l, r)),
+                    _ => None,
+                },
+                _ => None,
+            };
         }
     }
 }
@@ -647,6 +657,20 @@ impl Engine {
             h.volume.SetMasterVolumeLevelScalar(level, std::ptr::null()).map_err(win)?;
             Ok(level)
         }
+    }
+
+    /// Баланс стереоустройства (−1..1).
+    pub fn set_balance(&self, id: &str, balance: f32) -> Result<(), AudioError> {
+        let h = self.device(id)?;
+        let (l, r) = model::channels_for(balance);
+        unsafe {
+            if h.volume.GetChannelCount().map_err(win)? != 2 {
+                return Err(AudioError::NotFound);
+            }
+            h.volume.SetChannelVolumeLevelScalar(0, l, std::ptr::null()).map_err(win)?;
+            h.volume.SetChannelVolumeLevelScalar(1, r, std::ptr::null()).map_err(win)?;
+        }
+        Ok(())
     }
 
     /// Сделать устройство устройством по умолчанию (все роли) или только устройством связи.

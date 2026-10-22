@@ -58,6 +58,7 @@ const CMD_EXIT: u32 = 3;
 const CMD_PLAYBACK: u32 = 4;
 const CMD_RECORDING: u32 = 5;
 const CMD_SOUNDS: u32 = 6;
+const CMD_KMIXER: u32 = 7;
 /// Пункты устройств: `CMD_DEVICE + номер` в списке устройств вывода.
 const CMD_DEVICE: u32 = 100;
 /// Пункты профилей: `CMD_PROFILE + номер`.
@@ -196,6 +197,7 @@ fn run_hotkey(hwnd: HWND, id: i32) {
             let anchor = icon_rect(hwnd).unwrap_or(Rect { left: x, top: y, right: x + 1, bottom: y + 1 });
             ctx.shared.toggle(anchor);
         }
+        Bound::Global(Action::Mixer) => open_mixer(),
         Bound::Global(Action::Louder) => {
             let _ = c.adjust_default(STEP);
         }
@@ -288,6 +290,14 @@ fn react_to_changes(hwnd: HWND) {
     run_cmds(&ctx.control, cmds);
     if let Some(i) = profile {
         run_profile(&ctx.shared, &ctx.control, i);
+    }
+}
+
+/// Окно микшера — свой процесс `kamerton --mixer` (обычное окно, нужно редко).
+pub fn open_mixer() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    if let Ok(child) = std::process::Command::new(exe).arg("--mixer").spawn() {
+        sys::allow_foreground(child.id());
     }
 }
 
@@ -564,7 +574,13 @@ unsafe extern "system" fn wheel_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             bottom: ICON_RECT[3].load(Ordering::Relaxed),
         };
         let tray = TRAY_HWND.load(Ordering::Relaxed);
-        if tray != 0 && r.contains(info.pt.x, info.pt.y) {
+        // Над значком — всегда; вне открытого окна — если включено «Колесо вне окна».
+        let outside = CTX.get().is_some_and(|c| {
+            c.shared.is_open()
+                && c.shared.wheel_outside.load(Ordering::Relaxed)
+                && sys::window_rect(c.shared.hwnd()).is_some_and(|w| !w.contains(info.pt.x, info.pt.y))
+        });
+        if tray != 0 && (r.contains(info.pt.x, info.pt.y) || outside) {
             let delta = (info.mouseData >> 16) as u16 as i16;
             unsafe {
                 let _ = PostMessageW(Some(sys::hwnd(tray)), WM_WHEEL, WPARAM(delta as u16 as usize), LPARAM(0));
@@ -603,7 +619,9 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
             let w = sys::wide(text);
             let _ = AppendMenuW(m, flags, id, PCWSTR(w.as_ptr()));
         };
-        let devices = menu_devices(&ctx.control);
+        let hidden = ctx.shared.settings.lock().unwrap().hidden_devices.clone();
+        let devices: Vec<(String, String, bool)> =
+            menu_devices(&ctx.control).into_iter().filter(|(id, _, _)| !hidden.contains(id)).collect();
         if devices.is_empty() {
             add(menu, MF_STRING | MF_GRAYED, 0, T::NoDevices.get());
         }
@@ -627,6 +645,7 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
             }
             add(menu, MF_POPUP, sub.0 as usize, T::Profiles.get());
         }
+        add(menu, MF_STRING, CMD_KMIXER as usize, T::MixerApp.get());
         add(menu, MF_POPUP, panels.0 as usize, T::WindowsPanels.get());
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         add(menu, MF_STRING, CMD_EXIT as usize, T::Exit.get());
@@ -641,6 +660,7 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
             CMD_PLAYBACK => sys::run("control.exe", "mmsys.cpl,,0"),
             CMD_RECORDING => sys::run("control.exe", "mmsys.cpl,,1"),
             CMD_SOUNDS => sys::run("control.exe", "mmsys.cpl,,2"),
+            CMD_KMIXER => open_mixer(),
             c if c >= CMD_PROFILE => run_profile(&ctx.shared, &ctx.control, (c - CMD_PROFILE) as usize),
             c if c >= CMD_DEVICE => {
                 if let Some((id, _, _)) = devices.get((c - CMD_DEVICE) as usize) {
@@ -768,6 +788,7 @@ mod tests {
             muted: false,
             is_default: false,
             is_comm: false,
+            balance: None,
             apps,
         };
         let s = Snapshot {

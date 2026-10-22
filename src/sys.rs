@@ -9,13 +9,15 @@ use windows::Win32::Graphics::Gdi::{
     SetWindowRgn,
 };
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::System::Registry::{
+    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, PostMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetForegroundWindow,
-    SetWindowPos, ShowWindow, WM_CLOSE,
+    HWND_TOPMOST, PostMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -146,6 +148,78 @@ pub fn run(file: &str, params: &str) {
     unsafe {
         ShellExecuteW(None, w!("open"), PCWSTR(f.as_ptr()), PCWSTR(p.as_ptr()), None, SW_SHOWNORMAL);
     }
+}
+
+const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+
+/// Запускается ли Kamerton при входе в Windows (`HKCU\…\Run`, значение `Kamerton`).
+pub fn autostart() -> bool {
+    let mut size = 0u32;
+    unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Kamerton"), RRF_RT_REG_SZ, None, None, Some(&mut size)).is_ok()
+    }
+}
+
+/// Включить или выключить запуск при входе: путь к этому exe в кавычках.
+pub fn set_autostart(on: bool) {
+    unsafe {
+        if on {
+            let Ok(exe) = std::env::current_exe() else { return };
+            let value = wide(&format!("\"{}\"", exe.display()));
+            let _ = RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                RUN_KEY,
+                w!("Kamerton"),
+                REG_SZ.0,
+                Some(value.as_ptr() as *const _),
+                (value.len() * 2) as u32,
+            );
+        } else {
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Kamerton"));
+        }
+    }
+}
+
+/// Поставить обычное (не «поверх всех») окно.
+pub fn place_normal(raw: isize, r: [i32; 4]) {
+    unsafe {
+        let _ = SetWindowPos(hwnd(raw), None, r[0], r[1], r[2], r[3], SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
+/// Найти окно по заголовку и вывести наверх (второй `--mixer`).
+pub fn raise_window(title: &str) -> bool {
+    let t = wide(title);
+    unsafe {
+        match windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, PCWSTR(t.as_ptr())) {
+            Ok(h) if !h.is_invalid() => {
+                let _ = ShowWindow(h, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
+                let _ = SetForegroundWindow(h);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Захватить «окно микшера уже открыто». `None` — уже открыто.
+pub fn single_mixer() -> Option<HANDLE> {
+    let h = unsafe { CreateMutexW(None, true, w!("Local\\KamertonMixer")) }.ok()?;
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS { None } else { Some(h) }
+}
+
+/// Разрешить процессу окна взять фокус: щелчок пришёл трею, а окно — другой процесс.
+pub fn allow_foreground(pid: u32) {
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid);
+    }
+}
+
+/// Прямоугольник окна на экране.
+pub fn window_rect(raw: isize) -> Option<Rect> {
+    let mut r = RECT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd(raw), &mut r) }.ok()?;
+    Some(rect(r))
 }
 
 /// Открыть адрес или программу оболочкой Windows (`ms-settings:sound`, `sndvol.exe`).

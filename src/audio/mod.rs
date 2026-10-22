@@ -54,6 +54,7 @@ pub(crate) enum Command {
     Snapshot(Reply<Snapshot>),
     SetDefault(String, Roles, Reply<Result<(), AudioError>>),
     MoveApp(AppKey, Option<String>, Reply<Result<(), AudioError>>),
+    SetBalance(String, f32, Reply<Result<(), AudioError>>),
 }
 
 /// Сообщение потоку звука: метка «перечитай» от Windows, команда или выход.
@@ -207,6 +208,11 @@ impl Control {
         self.ask(|r| Command::SetDefault(device.to_string(), roles, r))?
     }
 
+    /// Баланс стереоустройства: −1 — только левый, 1 — только правый.
+    pub fn set_balance(&self, device: &str, balance: f32) -> Result<(), AudioError> {
+        self.ask(|r| Command::SetBalance(device.to_string(), balance, r))?
+    }
+
     /// Закрепить программу за устройством; `None` — «как в системе».
     pub fn move_app(&self, app: AppKey, to: Option<String>) -> Result<(), AudioError> {
         self.ask(|r| Command::MoveApp(app, to, r))?
@@ -317,6 +323,9 @@ fn handle(engine: &mut win::Engine, msg: Msg, marks: &mut Marks) -> bool {
         }
         Msg::Do(Command::SetDefault(id, roles, r)) => {
             let _ = r.send(engine.set_default(&id, roles));
+        }
+        Msg::Do(Command::SetBalance(id, b, r)) => {
+            let _ = r.send(engine.set_balance(&id, b));
         }
         Msg::Do(Command::MoveApp(key, to, r)) => {
             let result = engine.move_app(&key, to.as_deref());

@@ -14,6 +14,19 @@ pub fn init() {
     ENGLISH.store(en, Ordering::Relaxed);
 }
 
+/// Язык из настроек; `KAMERTON_LANG` (проверка вида) важнее.
+pub fn apply(pref: crate::config::LangPref) {
+    if std::env::var_os("KAMERTON_LANG").is_some() {
+        return;
+    }
+    let en = match pref {
+        crate::config::LangPref::Ru => false,
+        crate::config::LangPref::En => true,
+        crate::config::LangPref::System => anvil_ui::lang::system_language() != anvil_ui::Lang::Ru,
+    };
+    ENGLISH.store(en, Ordering::Relaxed);
+}
+
 pub fn english() -> bool {
     ENGLISH.load(Ordering::Relaxed)
 }
@@ -69,11 +82,32 @@ pub enum T {
     Output,
     Apps,
     NoProfiles,
+    Settings,
+    Appearance,
+    Theme,
+    ThemeSystem,
+    ThemeLight,
+    ThemeDark,
+    Language,
+    WindowSection,
+    Animation,
+    WheelOutside,
+    LogScale,
+    Autostart,
+    Hidden,
+    NothingHidden,
+    Show,
+    Hide,
+    MixerApp,
+    Balance,
+    BalanceL,
+    BalanceR,
+    ActMixer,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 49] = [
+    pub const ALL: [T; 70] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -123,6 +157,27 @@ impl T {
         T::Output,
         T::Apps,
         T::NoProfiles,
+        T::Settings,
+        T::Appearance,
+        T::Theme,
+        T::ThemeSystem,
+        T::ThemeLight,
+        T::ThemeDark,
+        T::Language,
+        T::WindowSection,
+        T::Animation,
+        T::WheelOutside,
+        T::LogScale,
+        T::Autostart,
+        T::Hidden,
+        T::NothingHidden,
+        T::Show,
+        T::Hide,
+        T::MixerApp,
+        T::Balance,
+        T::BalanceL,
+        T::BalanceR,
+        T::ActMixer,
     ];
 
     /// (русский, английский)
@@ -180,6 +235,27 @@ impl T {
                 "Профилей пока нет: настройте звук и нажмите «Сохранить текущее»",
                 "No profiles yet: set up the sound and press «Save current»",
             ),
+            T::Settings => ("Настройки", "Settings"),
+            T::Appearance => ("Оформление", "Appearance"),
+            T::Theme => ("Тема", "Theme"),
+            T::ThemeSystem => ("Система", "System"),
+            T::ThemeLight => ("Светлая", "Light"),
+            T::ThemeDark => ("Тёмная", "Dark"),
+            T::Language => ("Язык", "Language"),
+            T::WindowSection => ("Окно", "Window"),
+            T::Animation => ("Анимация открытия", "Opening animation"),
+            T::WheelOutside => ("Колесо вне окна меняет громкость", "Wheel outside the window changes volume"),
+            T::LogScale => ("Логарифмическая шкала", "Logarithmic scale"),
+            T::Autostart => ("Запускать при входе в Windows", "Start with Windows"),
+            T::Hidden => ("Скрытое", "Hidden"),
+            T::NothingHidden => ("Ничего не скрыто", "Nothing is hidden"),
+            T::Show => ("Показать", "Show"),
+            T::Hide => ("Скрыть", "Hide"),
+            T::MixerApp => ("Микшер Kamerton", "Kamerton mixer"),
+            T::Balance => ("Баланс", "Balance"),
+            T::BalanceL => ("Л", "L"),
+            T::BalanceR => ("П", "R"),
+            T::ActMixer => ("Открыть микшер", "Open mixer"),
         }
     }
 

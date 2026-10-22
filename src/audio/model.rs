@@ -45,6 +45,8 @@ pub struct Device {
     pub is_default: bool,
     /// Устройство связи (роль communications).
     pub is_comm: bool,
+    /// Баланс стереоустройства: −1 — только левый, 0 — оба, 1 — только правый; `None` — не стерео.
+    pub balance: Option<f32>,
     pub apps: Vec<App>,
 }
 
@@ -255,6 +257,46 @@ pub fn step(now: f32, delta: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
+/// Баланс по громкости левого и правого канала (0..1 каждый).
+pub fn balance_of(left: f32, right: f32) -> f32 {
+    let top = left.max(right);
+    if top <= 0.0 { 0.0 } else { ((right - left) / top).clamp(-1.0, 1.0) }
+}
+
+/// Громкость левого и правого канала для баланса: в сторону — противоположный канал тише.
+pub fn channels_for(balance: f32) -> (f32, f32) {
+    let b = balance.clamp(-1.0, 1.0);
+    (if b > 0.0 { 1.0 - b } else { 1.0 }, if b < 0.0 { 1.0 + b } else { 1.0 })
+}
+
+/// Логарифмическая (квадратичная) шкала: положение ползунка ↔ громкость. Тихое — точнее.
+pub fn to_pos(volume: f32, log: bool) -> f32 {
+    if log { volume.clamp(0.0, 1.0).sqrt() } else { volume.clamp(0.0, 1.0) }
+}
+
+pub fn from_pos(pos: f32, log: bool) -> f32 {
+    let p = pos.clamp(0.0, 1.0);
+    if log { p * p } else { p }
+}
+
+/// Снимок без скрытого пользователем.
+pub fn visible(
+    s: &Snapshot,
+    hidden_apps: &std::collections::BTreeSet<String>,
+    hidden_devices: &std::collections::BTreeSet<String>,
+) -> Snapshot {
+    let devices = s
+        .devices
+        .iter()
+        .filter(|d| !hidden_devices.contains(&d.id))
+        .map(|d| Device {
+            apps: d.apps.iter().filter(|a| !hidden_apps.contains(&a.key.exe)).cloned().collect(),
+            ..d.clone()
+        })
+        .collect();
+    Snapshot { devices, ..s.clone() }
+}
+
 pub fn percent(v: f32) -> u32 {
     (v.clamp(0.0, 1.0) * 100.0).round() as u32
 }
@@ -330,6 +372,7 @@ mod tests {
             muted: false,
             is_default: false,
             is_comm: false,
+            balance: None,
             apps,
         }
     }
@@ -456,6 +499,45 @@ mod tests {
         a.pinned = None;
         b.pinned = None;
         assert_eq!(group("d", &[a, b])[0].pinned, None);
+    }
+
+    #[test]
+    fn balance_math() {
+        assert_eq!(channels_for(-0.5), (1.0, 0.5));
+        assert_eq!(channels_for(0.25), (0.75, 1.0));
+        assert_eq!(channels_for(0.0), (1.0, 1.0));
+        assert_eq!(balance_of(1.0, 0.5), -0.5);
+        assert_eq!(balance_of(0.4, 0.4), 0.0);
+        assert_eq!(balance_of(0.0, 0.0), 0.0);
+        for b in [-1.0, -0.3, 0.0, 0.6, 1.0] {
+            let (l, r) = channels_for(b);
+            assert!((balance_of(l, r) - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn log_scale_maps_middle_to_quarter() {
+        assert_eq!(from_pos(0.5, true), 0.25);
+        assert_eq!(to_pos(0.25, true), 0.5);
+        assert_eq!(from_pos(0.5, false), 0.5);
+        assert_eq!(to_pos(from_pos(0.37, true), true), 0.37);
+    }
+
+    #[test]
+    fn hidden_things_are_filtered() {
+        let s = Snapshot {
+            can_route: true,
+            devices: vec![
+                device("a", group("a", &[session(1, Some("x.exe"), 1.0), session(2, Some("y.exe"), 1.0)])),
+                device("b", Vec::new()),
+            ],
+        };
+        let apps = std::collections::BTreeSet::from(["y.exe".to_string()]);
+        let devs = std::collections::BTreeSet::from(["b".to_string()]);
+        let v = visible(&s, &apps, &devs);
+        assert_eq!(v.devices.len(), 1);
+        assert_eq!(v.devices[0].apps.len(), 1);
+        assert_eq!(v.devices[0].apps[0].key.exe, "x.exe");
     }
 
     #[test]

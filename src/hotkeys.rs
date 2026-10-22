@@ -11,10 +11,12 @@ pub enum Action {
     Quieter,
     Mute,
     NextOutput,
+    Mixer,
 }
 
 impl Action {
-    pub const ALL: [Action; 5] = [Action::Open, Action::Louder, Action::Quieter, Action::Mute, Action::NextOutput];
+    pub const ALL: [Action; 6] =
+        [Action::Open, Action::Louder, Action::Quieter, Action::Mute, Action::NextOutput, Action::Mixer];
 
     /// Имя в `settings.txt`.
     pub fn key(self) -> &'static str {
@@ -24,6 +26,7 @@ impl Action {
             Action::Quieter => "quieter",
             Action::Mute => "mute",
             Action::NextOutput => "next_output",
+            Action::Mixer => "mixer",
         }
     }
 

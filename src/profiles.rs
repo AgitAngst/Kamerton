@@ -188,6 +188,7 @@ mod tests {
             muted: false,
             is_default: default,
             is_comm: default,
+            balance: None,
             apps,
         }
     }

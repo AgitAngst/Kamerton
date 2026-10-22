@@ -1,14 +1,48 @@
 // Настройки: `%APPDATA%\Kamerton\settings.txt`, строки `ключ=значение`. Неизвестные строки сохраняются
 // как есть — их могла записать более новая версия. Без зависимостей.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::hotkeys::{Action, AppAction, Combo};
 use crate::profiles::{AppState, Memory, Profile};
 
+/// Тема окна.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemePref {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Язык интерфейса.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LangPref {
+    #[default]
+    System,
+    Ru,
+    En,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
+    /// `theme=system|light|dark`.
+    pub theme: ThemePref,
+    /// `lang=system|ru|en`.
+    pub lang: LangPref,
+    /// Анимация открытия окна: `animate=1`.
+    pub animate: bool,
+    /// Колесо вне открытого окна меняет громкость: `wheel_outside=1`.
+    pub wheel_outside: bool,
+    /// Логарифмическая (квадратичная) шкала ползунков: `log_scale=1`.
+    pub log_scale: bool,
+    /// Скрытые программы: строки `hide_app=<путь exe>`.
+    pub hidden_apps: BTreeSet<String>,
+    /// Скрытые устройства: строки `hide_device=<id>`.
+    pub hidden_devices: BTreeSet<String>,
+    /// Место и размер окна микшера, физические пиксели: `mixer_rect=x,y,w,h`.
+    pub mixer_rect: Option<[i32; 4]>,
     /// Окно развёрнуто: все устройства вывода и записи, а не только устройство по умолчанию.
     pub expanded: bool,
     /// Общие сочетания: `hotkey.<действие>=<сочетание>`.
@@ -30,6 +64,14 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            theme: ThemePref::System,
+            lang: LangPref::System,
+            animate: true,
+            wheel_outside: false,
+            log_scale: false,
+            hidden_apps: BTreeSet::new(),
+            hidden_devices: BTreeSet::new(),
+            mixer_rect: None,
             expanded: false,
             hotkeys: BTreeMap::new(),
             app_hotkeys: BTreeMap::new(),
@@ -71,8 +113,39 @@ impl Settings {
                 }
                 continue;
             };
+            let on = v == "1" || v.eq_ignore_ascii_case("true");
             if k == "expanded" {
-                s.expanded = v == "1" || v.eq_ignore_ascii_case("true");
+                s.expanded = on;
+            } else if k == "theme" {
+                s.theme = match v {
+                    "light" => ThemePref::Light,
+                    "dark" => ThemePref::Dark,
+                    _ => ThemePref::System,
+                };
+            } else if k == "lang" {
+                s.lang = match v {
+                    "ru" => LangPref::Ru,
+                    "en" => LangPref::En,
+                    _ => LangPref::System,
+                };
+            } else if k == "animate" {
+                s.animate = on;
+            } else if k == "wheel_outside" {
+                s.wheel_outside = on;
+            } else if k == "log_scale" {
+                s.log_scale = on;
+            } else if k == "hide_app" && !v.is_empty() {
+                s.hidden_apps.insert(v.to_lowercase());
+            } else if k == "hide_device" && !v.is_empty() {
+                s.hidden_devices.insert(v.to_string());
+            } else if k == "mixer_rect" {
+                let n: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if let [x, y, w, h] = n[..]
+                    && w > 0
+                    && h > 0
+                {
+                    s.mixer_rect = Some([x, y, w, h]);
+                }
             } else if k == "remember" {
                 s.remember = v == "1" || v.eq_ignore_ascii_case("true");
             } else if k == "newapp_volume" {
@@ -127,7 +200,34 @@ impl Settings {
     }
 
     pub fn format(&self) -> String {
-        let mut out = format!("expanded={}\n", if self.expanded { 1 } else { 0 });
+        let b = |v: bool| if v { 1 } else { 0 };
+        let mut out = format!("expanded={}\n", b(self.expanded));
+        let theme = match self.theme {
+            ThemePref::System => "system",
+            ThemePref::Light => "light",
+            ThemePref::Dark => "dark",
+        };
+        let lang = match self.lang {
+            LangPref::System => "system",
+            LangPref::Ru => "ru",
+            LangPref::En => "en",
+        };
+        out.push_str(&format!("theme={theme}\nlang={lang}\n"));
+        out.push_str(&format!(
+            "animate={}\nwheel_outside={}\nlog_scale={}\n",
+            b(self.animate),
+            b(self.wheel_outside),
+            b(self.log_scale)
+        ));
+        for exe in &self.hidden_apps {
+            out.push_str(&format!("hide_app={exe}\n"));
+        }
+        for id in &self.hidden_devices {
+            out.push_str(&format!("hide_device={id}\n"));
+        }
+        if let Some([x, y, w, h]) = self.mixer_rect {
+            out.push_str(&format!("mixer_rect={x},{y},{w},{h}\n"));
+        }
         out.push_str(&format!("remember={}\n", if self.remember { 1 } else { 0 }));
         if let Some(v) = self.new_app_volume {
             out.push_str(&format!("newapp_volume={v}\n"));
@@ -195,7 +295,10 @@ mod tests {
     fn round_trip_keeps_unknown_lines() {
         let s = Settings::parse("expanded=1\nfuture=yes\n\n# note\n");
         assert!(s.expanded);
-        assert_eq!(s.format(), "expanded=1\nremember=1\nfuture=yes\n# note\n");
+        assert_eq!(
+            s.format(),
+            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nremember=1\nfuture=yes\n# note\n"
+        );
         assert_eq!(Settings::parse(&s.format()), s);
     }
 
@@ -244,6 +347,22 @@ mod tests {
         assert_eq!(p.name, "Игра");
         assert_eq!(p.apps[r"c:\apps\browser.exe"].device.as_deref(), Some("{0.0.0.00000000}.{demo-phones}"));
         assert_eq!(p.apps[r"c:\apps\player.exe"], AppState { volume: 0.7, muted: true, device: None });
+        assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn view_settings_round_trip() {
+        let text = concat!(
+            "theme=dark\nlang=en\nanimate=0\nwheel_outside=1\nlog_scale=1\n",
+            r"hide_app=C:\Apps\Noisy.exe",
+            "\nhide_device={0.0.0.00000000}.{demo}\nmixer_rect=10,20,900,500\nmixer_rect=bad\n",
+        );
+        let s = Settings::parse(text);
+        assert_eq!((s.theme, s.lang), (ThemePref::Dark, LangPref::En));
+        assert!(!s.animate && s.wheel_outside && s.log_scale);
+        assert!(s.hidden_apps.contains(r"c:\apps\noisy.exe"));
+        assert!(s.hidden_devices.contains("{0.0.0.00000000}.{demo}"));
+        assert_eq!(s.mixer_rect, Some([10, 20, 900, 500]));
         assert_eq!(Settings::parse(&s.format()), s);
     }
 

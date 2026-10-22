@@ -156,3 +156,20 @@
   записывается таймером через 2 с после изменения и при выходе. Свои же команды возвращаются событиями
   и только подтверждают память.
 - Применить профиль — `tray::run_profile` (из меню значка, со страницы «Профили», по правилу).
+
+## Настройки, окно микшера, баланс (этап 0.6)
+
+- Тема и язык из `settings.txt` (`theme`, `lang`); `KAMERTON_THEME`/`KAMERTON_LANG` важнее — для снимков.
+  Смена на странице — сразу: `anvil_ui::choose`, `texts::apply` и язык набора.
+- Скрытое — `hidden_apps`/`hidden_devices`; окно и микшер рисуют `Shared::visible` (снимок без скрытого,
+  `model::visible`), меню значка пропускает скрытые устройства.
+- Шкала — `model::to_pos`/`from_pos` (квадрат); ползунок узнаёт о ней из данных контекста egui.
+- Анимация — `Flyout::layout` со сдвигом от края панели задач, кривая `motion::curve::ease_out` набора,
+  флаг Windows — `motion::pref::animations_enabled`.
+- Колесо вне окна — тот же хук трея: окно открыто (`Shared::is_open`) и флаг `Shared::wheel_outside`
+  (копия настройки без блокировки), курсор вне `GetWindowRect` окна → шаг, колесо поглощается.
+- Окно микшера — процесс `kamerton --mixer` (мьютекс `Local\KamertonMixer`; второй находит окно по
+  заголовку и выводит наверх), тот же `Flyout` в режиме `mixer`: обычное окно `shell::Config` с рамкой,
+  колонки `MIXER_COLUMN` = 340. Место и размер — `mixer_rect` при закрытии.
+- Баланс — `IAudioEndpointVolume`: у двухканальных устройств `GetChannelVolumeLevelScalar(0|1)` →
+  `model::balance_of`; установка — `model::channels_for` → `SetChannelVolumeLevelScalar`.

@@ -106,7 +106,7 @@ fn run_tray() -> Result<(), String> {
     // Окно микшера живёт в этом же процессе с самого старта (спрятано под плащом): по щелчку оно
     // только встаёт на место и проявляется.
     shell::run(
-        shell::Config { title: "Kamerton", size: [flyout::WIDTH, 200.0] },
+        shell::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
         Box::new(|ctx, hwnd| {
             let wake = ctx.clone();
             let (audio, snapshot) = Audio::start_quiet(move || {
@@ -121,6 +121,33 @@ fn run_tray() -> Result<(), String> {
     )
 }
 
+/// Окно микшера Kamerton: обычное окно со всеми устройствами. Второе — выводит первое наверх.
+fn run_mixer() -> Result<(), String> {
+    texts::init();
+    let settings = config::Settings::load();
+    texts::apply(settings.lang);
+    let title = texts::T::MixerApp.get();
+    let snapping = std::env::var_os("KAMERTON_SNAP").is_some();
+    let Some(_instance) = sys::single_mixer() else {
+        sys::raise_window(title);
+        return Ok(());
+    };
+    shell::run(
+        shell::Config {
+            title,
+            size: [960.0, 560.0],
+            decorations: true,
+            resizable: true,
+            always_on_top: false,
+            skip_taskbar: false,
+            // Снимок для проверки вида — за экранами и без фокуса, не мешая пользователю.
+            position: snapping.then_some([-4000, -4000]),
+            active: !snapping,
+        },
+        Box::new(|ctx, hwnd| flyout::Flyout::mixer_window(ctx, hwnd).map(|f| Box::new(f) as Box<dyn shell::Content>)),
+    )
+}
+
 /// Окно микшера отдельным процессом — для проверки вида (`--flyout --passive`).
 /// `anchor` — «left,top,right,bottom» значка в трее; без него — угол основного монитора.
 fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
@@ -130,7 +157,7 @@ fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
         (v.len() == 4).then(|| placement::Rect { left: v[0], top: v[1], right: v[2], bottom: v[3] })
     });
     shell::run(
-        shell::Config { title: "Kamerton", size: [flyout::WIDTH, 200.0] },
+        shell::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
         Box::new(move |ctx, hwnd| {
             flyout::Flyout::standalone(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn shell::Content>)
         }),
@@ -148,6 +175,13 @@ fn main() {
     }
     sys::attach_console();
     let has = |a: &str| args.iter().any(|x| x == a);
+    if has("--mixer") {
+        if let Err(e) = run_mixer() {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if has("--flyout") {
         let anchor =
             args.iter().position(|x| x == "--flyout").and_then(|i| args.get(i + 1)).filter(|a| !a.starts_with("--"));

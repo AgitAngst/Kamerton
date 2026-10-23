@@ -15,11 +15,11 @@ use windows::Win32::Media::Audio::Endpoints::{
     IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl, IAudioMeterInformation,
 };
 use windows::Win32::Media::Audio::{
-    AUDIO_VOLUME_NOTIFICATION_DATA, AudioSessionDisconnectReason, AudioSessionState, AudioSessionStateExpired,
-    DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioSessionControl, IAudioSessionControl2,
-    IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2, IAudioSessionNotification,
-    IAudioSessionNotification_Impl, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-    ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eCommunications, eConsole, eRender,
+    AUDIO_VOLUME_NOTIFICATION_DATA, AudioSessionDisconnectReason, AudioSessionState, AudioSessionStateActive,
+    AudioSessionStateExpired, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioSessionControl,
+    IAudioSessionControl2, IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
+    IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
+    IMMNotificationClient_Impl, ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eCommunications, eConsole, eRender,
 };
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
@@ -422,6 +422,7 @@ fn read_session(s: &mut SessionHandle, descriptions: &mut HashMap<String, Option
         String::new()
     };
     unsafe {
+        s.raw.active = s.ctrl.GetState().is_ok_and(|st| st == AudioSessionStateActive);
         if let Ok(v) = s.simple.GetMasterVolume() {
             s.raw.volume = v;
         }
@@ -608,8 +609,16 @@ impl Engine {
         let flow = h.info.flow;
         let pinned =
             if system { None } else { routes.entry((pid, flow)).or_insert_with(|| policy.route(pid, flow)).clone() };
-        let raw =
-            RawSession { pid, path: proc.path.clone(), name: String::new(), volume: 1.0, muted: false, system, pinned };
+        let raw = RawSession {
+            pid,
+            path: proc.path.clone(),
+            name: String::new(),
+            volume: 1.0,
+            muted: false,
+            system,
+            pinned,
+            active: false,
+        };
         let mut s = SessionHandle { id, ctrl: ctrl2, simple, meter, events, raw };
         read_session(&mut s, descriptions);
         h.sessions.push(s);
@@ -630,11 +639,25 @@ impl Engine {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        let default_of = |flow: Flow| {
+            self.devices.iter().find(|h| h.info.flow == flow && h.info.is_default).map(|h| h.info.id.as_str())
+        };
+        let present = |device: &str, exe: &str| {
+            self.devices.iter().any(|h| h.info.id == device && h.sessions.iter().any(|s| model::exe_key(&s.raw) == exe))
+        };
         let devices = self
             .devices
             .iter()
             .map(|h| {
-                let raw: Vec<RawSession> = h.sessions.iter().map(|s| s.raw.clone()).collect();
+                let raw: Vec<RawSession> = h
+                    .sessions
+                    .iter()
+                    .filter(|s| {
+                        let exe = model::exe_key(&s.raw);
+                        !model::moved_away(&h.info.id, &s.raw, default_of(h.info.flow), |d| present(d, &exe))
+                    })
+                    .map(|s| s.raw.clone())
+                    .collect();
                 Device { apps: model::group(&h.info.id, &raw), ..h.info.clone() }
             })
             .collect();

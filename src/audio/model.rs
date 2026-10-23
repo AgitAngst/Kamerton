@@ -88,6 +88,8 @@ pub struct RawSession {
     pub system: bool,
     /// Закрепление процесса за устройством.
     pub pinned: Option<String>,
+    /// Сессия сейчас играет (состояние Active).
+    pub active: bool,
 }
 
 /// Служебные процессы, которые не показываются как программы (EarTrumpet #1095).
@@ -101,6 +103,19 @@ fn bare(d: &Device) -> Device {
 }
 
 /// Ключ файла для `AppKey::exe`.
+/// Сессия осталась на прежнем устройстве после переноса программы (EarTrumpet прячет такие же):
+/// она молчит, программа закреплена за другим устройством (не закреплена — за устройством по умолчанию)
+/// и там у неё уже есть сессия. Windows держит такую сессию неактивной, пока программа не закроется.
+pub fn moved_away(device: &str, s: &RawSession, default: Option<&str>, present_on: impl Fn(&str) -> bool) -> bool {
+    if s.system || s.active {
+        return false;
+    }
+    match s.pinned.as_deref().or(default) {
+        Some(target) if target != device => present_on(target),
+        _ => false,
+    }
+}
+
 pub fn exe_key(s: &RawSession) -> String {
     if s.system {
         "system".into()
@@ -360,7 +375,26 @@ mod tests {
             muted: false,
             system: false,
             pinned: None,
+            active: false,
         }
+    }
+
+    #[test]
+    fn moved_session_hidden_only_when_app_is_on_target() {
+        let mut s = session(7, Some(r"C:\Demo\player.exe"), 0.5);
+        s.pinned = Some("phones".into());
+        // Молчит на колонках, закреплена за наушниками и там уже есть — прятать.
+        assert!(moved_away("speakers", &s, Some("speakers"), |d| d == "phones"));
+        // На наушниках её ещё нет — показывать, чтобы программа не пропала совсем.
+        assert!(!moved_away("speakers", &s, Some("speakers"), |_| false));
+        // Играет — показывать всегда.
+        s.active = true;
+        assert!(!moved_away("speakers", &s, Some("speakers"), |_| true));
+        // Не закреплена: остаток на прежнем устройстве по умолчанию прячется.
+        s.active = false;
+        s.pinned = None;
+        assert!(moved_away("phones", &s, Some("speakers"), |d| d == "speakers"));
+        assert!(!moved_away("speakers", &s, Some("speakers"), |_| true));
     }
 
     fn device(id: &str, apps: Vec<App>) -> Device {

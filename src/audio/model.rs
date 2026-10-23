@@ -278,10 +278,13 @@ pub fn balance_of(left: f32, right: f32) -> f32 {
     if top <= 0.0 { 0.0 } else { ((right - left) / top).clamp(-1.0, 1.0) }
 }
 
-/// Громкость левого и правого канала для баланса: в сторону — противоположный канал тише.
-pub fn channels_for(balance: f32) -> (f32, f32) {
+/// Громкость левого и правого канала для баланса при громкости устройства `level`: в сторону —
+/// противоположный канал тише, громкий остаётся на `level`. Windows считает громкость устройства по
+/// громкому каналу, так что баланс её не меняет.
+pub fn channels_for(balance: f32, level: f32) -> (f32, f32) {
     let b = balance.clamp(-1.0, 1.0);
-    (if b > 0.0 { 1.0 - b } else { 1.0 }, if b < 0.0 { 1.0 + b } else { 1.0 })
+    let level = level.clamp(0.0, 1.0);
+    (if b > 0.0 { 1.0 - b } else { 1.0 } * level, if b < 0.0 { 1.0 + b } else { 1.0 } * level)
 }
 
 /// Логарифмическая (квадратичная) шкала: положение ползунка ↔ громкость. Тихое — точнее.
@@ -537,14 +540,17 @@ mod tests {
 
     #[test]
     fn balance_math() {
-        assert_eq!(channels_for(-0.5), (1.0, 0.5));
-        assert_eq!(channels_for(0.25), (0.75, 1.0));
-        assert_eq!(channels_for(0.0), (1.0, 1.0));
+        assert_eq!(channels_for(-0.5, 1.0), (1.0, 0.5));
+        assert_eq!(channels_for(0.25, 1.0), (0.75, 1.0));
+        // Громкость устройства остаётся прежней: громкий канал — на ней.
+        assert_eq!(channels_for(-0.5, 0.4), (0.4, 0.2));
+        assert_eq!(channels_for(0.5, 0.2), (0.1, 0.2));
+        assert_eq!(channels_for(0.0, 0.66), (0.66, 0.66));
         assert_eq!(balance_of(1.0, 0.5), -0.5);
         assert_eq!(balance_of(0.4, 0.4), 0.0);
         assert_eq!(balance_of(0.0, 0.0), 0.0);
         for b in [-1.0, -0.3, 0.0, 0.6, 1.0] {
-            let (l, r) = channels_for(b);
+            let (l, r) = channels_for(b, 0.5);
             assert!((balance_of(l, r) - b).abs() < 1e-6);
         }
     }

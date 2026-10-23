@@ -708,11 +708,13 @@ impl Engine {
     /// Баланс стереоустройства (−1..1).
     pub fn set_balance(&self, id: &str, balance: f32) -> Result<(), AudioError> {
         let h = self.device(id)?;
-        let (l, r) = model::channels_for(balance);
         unsafe {
             if h.volume.GetChannelCount().map_err(win)? != 2 {
                 return Err(AudioError::NotFound);
             }
+            // Каналы — от нынешней громкости устройства: баланс её не трогает.
+            let level = h.volume.GetMasterVolumeLevelScalar().map_err(win)?;
+            let (l, r) = model::channels_for(balance, level);
             h.volume.SetChannelVolumeLevelScalar(0, l, std::ptr::null()).map_err(win)?;
             h.volume.SetChannelVolumeLevelScalar(1, r, std::ptr::null()).map_err(win)?;
         }

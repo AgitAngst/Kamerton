@@ -128,6 +128,34 @@ pub fn speaker(painter: &Painter, rect: Rect, color: Color32, level: f32, muted:
     }
 }
 
+/// «Наружу» в сетке 24 × 24: рамка со стрелкой из угла — ссылка открывает другое окно (Параметры Windows).
+pub fn external(painter: &Painter, rect: Rect, color: Color32) {
+    let s = rect.width() / 24.0;
+    let p = |x: f32, y: f32| -> Pos2 { pos2(rect.left() + x * s, rect.top() + y * s) };
+    let stroke = Stroke::new((2.0 * s).max(1.2), color);
+    painter.add(eframe::egui::Shape::line(vec![p(14.0, 4.0), p(20.0, 4.0), p(20.0, 10.0)], stroke));
+    painter.line_segment([p(20.0, 4.0), p(11.0, 13.0)], stroke);
+    let frame = vec![p(18.0, 14.0), p(18.0, 20.0), p(4.0, 20.0), p(4.0, 6.0), p(10.0, 6.0)];
+    painter.add(eframe::egui::Shape::line(frame, stroke));
+}
+
+/// Клавиатура в сетке 24 × 24: корпус, ряд клавиш и пробел — вход на страницу сочетаний.
+pub fn keyboard(painter: &Painter, rect: Rect, color: Color32) {
+    let s = rect.width() / 24.0;
+    let p = |x: f32, y: f32| -> Pos2 { pos2(rect.left() + x * s, rect.top() + y * s) };
+    let stroke = Stroke::new((1.6 * s).max(1.2), color);
+    painter.rect_stroke(
+        Rect::from_min_max(p(2.0, 6.0), p(22.0, 18.0)),
+        eframe::egui::CornerRadius::same((2.0 * s) as u8),
+        stroke,
+        eframe::egui::StrokeKind::Middle,
+    );
+    for x in [6.0, 10.0, 14.0, 18.0] {
+        painter.circle_filled(p(x, 10.0), 0.9 * s, color);
+    }
+    painter.line_segment([p(7.0, 14.0), p(17.0, 14.0)], stroke);
+}
+
 /// Вид устройства для значка в списке — по имени, которое дала Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {

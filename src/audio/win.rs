@@ -418,8 +418,11 @@ fn read_session(s: &mut SessionHandle, descriptions: &mut HashMap<String, Option
         display
     } else if let Some(p) = &s.raw.path {
         descriptions.entry(p.clone()).or_insert_with(|| file_description(p)).clone().unwrap_or_default()
-    } else {
+    } else if s.raw.system {
         String::new()
+    } else {
+        // Процесс не открыть — имя exe есть в идентификаторе сессии.
+        model::exe_from_session(&s.id).unwrap_or_default()
     };
     unsafe {
         s.raw.active = s.ctrl.GetState().is_ok_and(|st| st == AudioSessionStateActive);

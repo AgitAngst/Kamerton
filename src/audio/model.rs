@@ -131,6 +131,14 @@ fn file_stem(path: &str) -> &str {
     file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file)
 }
 
+/// Имя exe из идентификатора сессии (`{…}.{…}|\Device\…\app.exe%b{…}|1%b1904`): процесс, который не
+/// открыть даже с малыми правами (служба, защищённый), всё равно назван по файлу, а не по номеру.
+pub fn exe_from_session(id: &str) -> Option<String> {
+    let path = id.split('|').nth(1)?.split("%b").next()?;
+    let stem = file_stem(path);
+    (!stem.is_empty() && stem != "#" && path.contains(['\\', '/'])).then(|| stem.to_string())
+}
+
 /// Слить сессии одного устройства в программы. Порядок — по первой встрече.
 pub fn group(device: &str, sessions: &[RawSession]) -> Vec<App> {
     let mut apps: Vec<App> = Vec::new();
@@ -160,7 +168,8 @@ pub fn group(device: &str, sessions: &[RawSession]) -> Vec<App> {
         } else if let Some(p) = &s.path {
             file_stem(p).to_string()
         } else {
-            format!("pid {}", s.pid)
+            // Имени нет — окно пишет «Неизвестная программа» и номер процесса мелко.
+            String::new()
         };
         index.insert(exe.clone(), apps.len());
         apps.push(App {
@@ -343,7 +352,7 @@ impl fmt::Display for Device {
 
 impl fmt::Display for App {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}%", self.name, percent(self.volume))?;
+        write!(f, "{} {}%", if self.name.is_empty() { "?" } else { &self.name }, percent(self.volume))?;
         if self.muted {
             f.write_str(" muted")?;
         }
@@ -440,9 +449,19 @@ mod tests {
         let apps = group("dev", &[sys, session(9, None, 1.0), named]);
         assert_eq!(apps[0].name, "System sounds");
         assert!(apps[0].system);
-        assert_eq!(apps[1].name, "pid 9");
+        assert_eq!(apps[1].name, "");
         assert_eq!(apps[1].key.exe, "pid:9");
         assert_eq!(apps[2].name, "Player");
+    }
+
+    #[test]
+    fn exe_name_from_session_id() {
+        let id =
+            r"{0.0.0.00000000}.{5c1b6c2e}|\Device\HarddiskVolume3\Windows\System32\svchost.exe%b{00000000}|1%b1904";
+        assert_eq!(exe_from_session(id).as_deref(), Some("svchost"));
+        // Системные звуки и чужой вид — без имени.
+        assert_eq!(exe_from_session(r"{0.0.0.00000000}.{5c1b6c2e}|#%b{A9EF3FD9}|1%b#"), None);
+        assert_eq!(exe_from_session("garbage"), None);
     }
 
     #[test]

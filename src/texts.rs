@@ -122,11 +122,25 @@ pub enum T {
     BalanceL,
     BalanceR,
     ActMixer,
+
+    UnknownApp,
+    DefaultMuted,
+    AppsSilent,
+    MicMuted,
+    MicSilent,
+    TurnOn,
+    RecordingApps,
+    NoRecordingApps,
+    MakeDefaultCaption,
+    AppHotkeysHint,
+    DefaultBadge,
+    Input,
+    BalanceCenter,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 86] = [
+    pub const ALL: [T; 99] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -213,6 +227,19 @@ impl T {
         T::BalanceL,
         T::BalanceR,
         T::ActMixer,
+        T::UnknownApp,
+        T::DefaultMuted,
+        T::AppsSilent,
+        T::MicMuted,
+        T::MicSilent,
+        T::TurnOn,
+        T::RecordingApps,
+        T::NoRecordingApps,
+        T::MakeDefaultCaption,
+        T::AppHotkeysHint,
+        T::DefaultBadge,
+        T::Input,
+        T::BalanceCenter,
     ];
 
     /// (русский, английский)
@@ -282,8 +309,8 @@ impl T {
             T::GroupWindow => ("Окно", "Window"),
             T::GroupVolume => ("Громкость", "Volume"),
             T::HotkeysHint => (
-                "Щёлкните сочетание, чтобы изменить. Esc — отмена, Backspace — убрать.",
-                "Click a hotkey to change it. Esc — cancel, Backspace — remove.",
+                "Щёлкните поле, чтобы задать сочетание. Esc — отмена, Backspace — убрать.",
+                "Click a field to set a hotkey. Esc — cancel, Backspace — remove.",
             ),
 
             T::OutputDevice => ("Устройство вывода", "Output device"),
@@ -313,6 +340,23 @@ impl T {
             T::BalanceL => ("Л", "L"),
             T::BalanceR => ("П", "R"),
             T::ActMixer => ("Открыть микшер", "Open mixer"),
+
+            T::UnknownApp => ("Неизвестная программа", "Unknown app"),
+            T::DefaultMuted => ("Устройство без звука", "Device is muted"),
+            T::AppsSilent => ("Программы на нём не слышно", "Apps on it can’t be heard"),
+            T::MicMuted => ("Микрофон без звука", "Microphone is muted"),
+            T::MicSilent => ("Программы его не слышат", "Apps can’t hear it"),
+            T::TurnOn => ("Включить", "Unmute"),
+            T::RecordingApps => ("Программы записи", "Recording apps"),
+            T::NoRecordingApps => ("Микрофон никто не слушает", "No app is using the microphone"),
+            T::MakeDefaultCaption => ("Сделать основным:", "Make default:"),
+            T::AppHotkeysHint => (
+                "Сочетания программы — правый щелчок по её строке → «Горячие клавиши…»",
+                "App hotkeys: right-click its row → “Hotkeys…”",
+            ),
+            T::DefaultBadge => ("Основное", "Default"),
+            T::Input => ("Ввод", "Input"),
+            T::BalanceCenter => ("Центр", "Center"),
         }
     }
 

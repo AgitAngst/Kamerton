@@ -135,6 +135,8 @@ pub fn wheel_step(delta: i16) -> f32 {
 enum Bound {
     Global(Action),
     App(AppAction, String),
+    /// Сделать устройство основным.
+    Device(String),
 }
 
 /// Зарегистрированные сочетания трея: id → действие. Живут в потоке трея.
@@ -168,6 +170,9 @@ fn register_hotkeys(hwnd: HWND) {
         }
         for ((a, exe), c) in &settings.app_hotkeys {
             items.push((format!("apphotkey.{}.{}", a.key(), exe), Bound::App(*a, exe.clone()), *c));
+        }
+        for (id, c) in &settings.device_hotkeys {
+            items.push((format!("devhotkey.{id}"), Bound::Device(id.clone()), *c));
         }
         for (n, (key, what, combo)) in items.into_iter().enumerate() {
             let id = n as i32 + 1;
@@ -216,15 +221,18 @@ fn run_hotkey(hwnd: HWND, id: i32) {
             let _ = c.adjust_default(-STEP);
         }
         Bound::Global(Action::Mute) => toggle_default_mute(c),
-        Bound::Global(Action::NextOutput) => {
+        Bound::Global(a @ (Action::NextOutput | Action::PrevOutput)) => {
             if let Ok(s) = c.snapshot() {
                 let outs: Vec<&crate::audio::Device> = s.devices.iter().filter(|d| d.flow == Flow::Render).collect();
                 let ids: Vec<&str> = outs.iter().map(|d| d.id.as_str()).collect();
                 let current = outs.iter().find(|d| d.is_default).map(|d| d.id.as_str());
-                if let Some(next) = next_output(&ids, current) {
+                if let Some(next) = next_output(&ids, current, a == Action::NextOutput) {
                     let _ = c.set_default(next, Roles::All);
                 }
             }
+        }
+        Bound::Device(id) => {
+            let _ = c.set_default(&id, Roles::All);
         }
         Bound::App(action, exe) => {
             let Ok(s) = c.snapshot() else { return };

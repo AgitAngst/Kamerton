@@ -41,6 +41,10 @@ pub const MIXER_HEADER: f32 = 40.0;
 pub const BOTTOM: f32 = 8.0;
 /// Строки списка устройств отступают от края окна на 4, всё остальное — на `PAD_X`.
 const INSET: f32 = 4.0;
+/// Страница сочетаний: строка, ширина поля сочетания, строка подписи раздела.
+const HOTKEY_ROW: f32 = 32.0;
+const HOTKEY_FIELD: f32 = 148.0;
+const HOTKEY_GROUP: f32 = 30.0;
 pub const EMPTY_ROW: f32 = 30.0;
 pub const FOOTER: f32 = 48.0;
 const NUMBER_W: f32 = 34.0;
@@ -525,7 +529,7 @@ impl Flyout {
         // Ползунок окна работает с 0..1: 0 — Л, 0.5 — середина, 1 — П.
         let target = Target::Device(format!("balance:{}", d.id));
         let shown = self.shown_value(&target, (b + 1.0) / 2.0);
-        let out = slider(ui, ui.id().with(("balance", &d.id)), track, shown, false, 0.0);
+        let out = slider_scaled(ui, ui.id().with(("balance", &d.id)), track, shown, false, 0.0, false);
         if let Some(v) = out.value {
             // Возле середины — ровно середина: так проще вернуть оба канала.
             let v = if (v - 0.5).abs() < 0.03 { 0.5 } else { v };
@@ -817,6 +821,8 @@ enum Page {
 enum Slot {
     Global(Action),
     App(AppAction, String),
+    /// Сочетание устройства (id) — сделать его основным.
+    Device(String),
 }
 
 impl Slot {
@@ -825,6 +831,7 @@ impl Slot {
         match self {
             Slot::Global(a) => format!("hotkey.{}", a.key()),
             Slot::App(a, exe) => format!("apphotkey.{}.{}", a.key(), exe),
+            Slot::Device(id) => format!("devhotkey.{id}"),
         }
     }
 }
@@ -836,6 +843,7 @@ fn action_text(a: Action) -> &'static str {
         Action::Quieter => T::ActQuieter.get(),
         Action::Mute => T::Mute.get(),
         Action::NextOutput => T::ActNext.get(),
+        Action::PrevOutput => T::ActPrev.get(),
         Action::Mixer => T::ActMixer.get(),
     }
 }
@@ -920,33 +928,84 @@ impl Flyout {
                 (Slot::App(a, exe), None) => {
                     s.app_hotkeys.remove(&(*a, exe.clone()));
                 }
+                (Slot::Device(id), Some(c)) => {
+                    s.device_hotkeys.insert(id.clone(), c);
+                }
+                (Slot::Device(id), None) => {
+                    s.device_hotkeys.remove(id);
+                }
             }
             s.save();
         }
         self.stop_capture();
     }
 
-    /// Строка: имя действия и поле сочетания набора.
-    fn hotkey_row(&mut self, ui: &mut Ui, name: &str, slot: Slot, combo: Option<Combo>) {
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(name).size(14.0));
+    /// Строка в два столбца: слева действие (у устройства — его значок), справа сочетание. Щелчок по
+    /// сочетанию — запись; занятое другой программой — красная точка; не задано — «Не задано».
+    fn hotkey_row(
+        &mut self,
+        ui: &mut Ui,
+        name: &str,
+        slot: Slot,
+        combo: Option<Combo>,
+        kind: Option<icons::DeviceKind>,
+    ) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_ROW), Sense::hover());
+        let p = Palette::of(ui);
+        let field = Rect::from_min_max(
+            pos2(rect.right() - HOTKEY_FIELD, rect.top() + 2.0),
+            pos2(rect.right(), rect.bottom() - 2.0),
+        );
+        let mut left = rect.left();
+        if let Some(kind) = kind {
+            let glyph = Rect::from_center_size(pos2(left + 7.5, rect.center().y), Vec2::splat(15.0));
+            icons::device(ui.painter(), glyph, p.text, kind);
+            left = glyph.right() + 8.0;
+        }
+        let label = Rect::from_min_max(pos2(left, rect.top()), pos2(field.left() - 10.0, rect.bottom()));
+        text_clipped(ui, label, name, FontId::proportional(13.5), p.text);
+
         let capturing = self.capture.as_ref() == Some(&slot);
-        let parts: Vec<String> = combo.map(|c| c.parts()).unwrap_or_default();
-        let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let free = self.shared.hotkey_free.lock().unwrap().get(&slot.key()).copied();
-        let status = match (capturing, combo, free) {
-            (true, _, _) => Some((true, T::CaptureHint.get())),
-            (false, Some(_), Some(false)) => Some((false, T::Taken.get())),
-            (false, Some(_), _) => Some((true, T::Free.get())),
-            (false, None, _) => None,
-        };
-        let change = if capturing { T::PressKeys.get() } else { T::Change.get() };
-        let shown_keys: Vec<&str> = if keys.is_empty() && !capturing { vec![T::NotSet.get()] } else { keys };
-        if anvil_ui::widgets::hotkey_field(ui, &shown_keys, change, status).clicked() && !capturing {
+        let response = ui.interact(field, ui.id().with(("hotkey", slot.key())), Sense::click());
+        if capturing {
+            ui.painter().rect_filled(field, radius::CONTROL, p.soft(p.accent));
+            ui.painter().rect_stroke(field, radius::CONTROL, Stroke::new(1.5, p.accent), StrokeKind::Inside);
+        } else if response.hovered() {
+            ui.painter().rect_filled(field, radius::CONTROL, p.hover);
+        }
+        let mut x = field.right() - 6.0;
+        let y = field.center().y;
+        if capturing {
+            ui.painter().text(
+                pos2(x, y),
+                Align2::RIGHT_CENTER,
+                T::PressKeys.get(),
+                FontId::proportional(12.5),
+                p.accent_text,
+            );
+        } else if let Some(combo) = combo {
+            let taken = self.shared.hotkey_free.lock().unwrap().get(&slot.key()).copied() == Some(false);
+            let color = if taken { p.text } else { p.weak };
+            for part in combo.parts().iter().rev() {
+                let galley = ui.painter().layout_no_wrap(part.clone(), FontId::monospace(11.5), color);
+                let chip = Rect::from_min_max(pos2(x - galley.size().x - 10.0, y - 9.5), pos2(x, y + 9.5));
+                ui.painter().rect(chip, radius::SMALL, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                ui.painter().galley(chip.center() - galley.size() / 2.0, galley, color);
+                x = chip.left() - 3.0;
+            }
+            if taken {
+                ui.painter().circle_filled(pos2(x - 5.0, y), 3.5, p.danger);
+            }
+        } else {
+            ui.painter().text(pos2(x, y), Align2::RIGHT_CENTER, T::NotSet.get(), FontId::proportional(12.5), p.faint);
+        }
+        anvil_ui::widgets::focus_ring(ui, field, &response, radius::CONTROL);
+        let hint = if capturing { T::CaptureHint.get() } else { T::Change.get() };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+        if response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() && !capturing {
             self.stop_capture();
             self.start_capture(slot);
         }
-        ui.add_space(4.0);
     }
 
     fn settings_page(&mut self, ui: &mut Ui) {
@@ -1169,7 +1228,7 @@ impl Flyout {
             let value = st.new_app_volume.unwrap_or(50) as f32 / 100.0;
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
             let number = Rect::from_min_max(pos2(row.right() - NUMBER_W, row.top()), row.max);
-            let track = Rect::from_min_max(row.min, pos2(number.left() - 10.0, row.bottom()));
+            let track = Rect::from_min_max(row.min - vec2(7.0, 0.0), pos2(number.left() - 3.0, row.bottom()));
             let out = slider(ui, ui.id().with("newapp"), track, value, false, 0.0);
             let v = out.value.unwrap_or(value);
             number_text(ui, number, v, false);
@@ -1255,8 +1314,11 @@ impl Flyout {
         }
     }
 
+    /// Одна страница в два столбца: «Окно», «Громкость», «Устройство вывода» (следующее, предыдущее,
+    /// каждое устройство), «Устройство ввода», затем программы со своими сочетаниями; внизу подсказка.
     fn hotkeys_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         self.capture_keys(ui);
+        ui.spacing_mut().item_spacing.y = 0.0;
         ui.horizontal(|ui| {
             if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
                 self.stop_capture();
@@ -1264,12 +1326,46 @@ impl Flyout {
             }
             ui.label(egui::RichText::new(T::Hotkeys.get()).font(anvil_ui::semibold(14.5)));
         });
-        ui.add_space(6.0);
-        anvil_ui::widgets::section_label(ui, T::General.get());
         let settings = self.shared.settings.lock().unwrap().clone();
-        for a in Action::ALL {
-            self.hotkey_row(ui, action_text(a), Slot::Global(a), settings.hotkeys.get(&a).copied());
-        }
+        let global = |a: Action| (action_text(a), Slot::Global(a), settings.hotkeys.get(&a).copied());
+        let group = |ui: &mut Ui,
+                     me: &mut Self,
+                     title: &str,
+                     rows: Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)>| {
+            if rows.is_empty() {
+                return;
+            }
+            hotkey_group(ui, title);
+            for (name, slot, combo, kind) in rows {
+                me.hotkey_row(ui, name, slot, combo, kind);
+            }
+        };
+        let plain = |(n, s, c): (&'static str, Slot, Option<Combo>)| (n, s, c, None);
+        group(ui, self, T::GroupWindow.get(), vec![plain(global(Action::Open)), plain(global(Action::Mixer))]);
+        group(
+            ui,
+            self,
+            T::GroupVolume.get(),
+            vec![plain(global(Action::Louder)), plain(global(Action::Quieter)), plain(global(Action::Mute))],
+        );
+        let device_rows = |flow: Flow| -> Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)> {
+            of_flow(snapshot, flow)
+                .into_iter()
+                .map(|d| {
+                    let kind = icons::device_kind(&d.name, flow == Flow::Capture);
+                    (
+                        d.name.as_str(),
+                        Slot::Device(d.id.clone()),
+                        settings.device_hotkeys.get(&d.id).copied(),
+                        Some(kind),
+                    )
+                })
+                .collect()
+        };
+        let mut outs = vec![plain(global(Action::NextOutput)), plain(global(Action::PrevOutput))];
+        outs.extend(device_rows(Flow::Render));
+        group(ui, self, T::OutputDevice.get(), outs);
+        group(ui, self, T::InputDevice.get(), device_rows(Flow::Capture));
         // Программы: у которых уже есть сочетания, и та, чьё меню открыло страницу.
         let mut exes: Vec<String> = settings.app_hotkeys.keys().map(|(_, e)| e.clone()).collect();
         if let Some(e) = &self.focus_app {
@@ -1278,9 +1374,6 @@ impl Flyout {
         exes.sort();
         exes.dedup();
         for exe in exes {
-            ui.add_space(8.0);
-            anvil_ui::widgets::divider(ui);
-            ui.add_space(6.0);
             let name = snapshot
                 .devices
                 .iter()
@@ -1288,13 +1381,45 @@ impl Flyout {
                 .find(|a| a.key.exe == exe)
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(&exe).to_string());
-            anvil_ui::widgets::section_label(ui, &name);
-            for a in AppAction::ALL {
-                let combo = settings.app_hotkeys.get(&(a, exe.clone())).copied();
-                self.hotkey_row(ui, app_action_text(a), Slot::App(a, exe.clone()), combo);
-            }
+            let rows = AppAction::ALL
+                .into_iter()
+                .map(|a| {
+                    (
+                        app_action_text(a),
+                        Slot::App(a, exe.clone()),
+                        settings.app_hotkeys.get(&(a, exe.clone())).copied(),
+                        None,
+                    )
+                })
+                .collect();
+            group(ui, self, &name, rows);
         }
+        ui.add_space(8.0);
+        anvil_ui::widgets::divider(ui);
+        ui.add_space(6.0);
+        let p = Palette::of(ui);
+        ui.label(egui::RichText::new(T::HotkeysHint.get()).size(12.0).color(p.weak));
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            let (dot, _) = ui.allocate_exact_size(vec2(7.0, 14.0), Sense::hover());
+            ui.painter().circle_filled(dot.center(), 3.5, p.danger);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(T::Taken.get()).size(12.0).color(p.weak));
+        });
     }
+}
+
+/// Подпись раздела страницы сочетаний: как `section_label` набора, в строке точной высоты.
+fn hotkey_group(ui: &mut Ui, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_GROUP), Sense::hover());
+    let p = Palette::of(ui);
+    ui.painter().text(
+        pos2(rect.left(), rect.bottom() - 9.0),
+        Align2::LEFT_CENTER,
+        text.to_uppercase(),
+        anvil_ui::semibold(11.0),
+        p.weak,
+    );
 }
 
 /// Заголовок раздела окна у значка: полужирный 14, `text`, с полем 16.
@@ -1766,8 +1891,13 @@ struct SliderOut {
 /// Ползунок громкости 0..1 с полоской уровня. Ловит только левую кнопку: правый щелчок уходит строке
 /// (её меню).
 fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: f32) -> SliderOut {
-    let p = Palette::of(ui);
     let log = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("kamerton-log-scale"))).unwrap_or(false);
+    slider_scaled(ui, id, rect, value, muted, peak, log)
+}
+
+/// Ползунок с явной шкалой: баланс всегда ровный (середина — в середине), громкость — по настройке.
+fn slider_scaled(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: f32, log: bool) -> SliderOut {
+    let p = Palette::of(ui);
     let response = ui.interact(rect, id, Sense::drag());
     let track = Rect::from_min_max(
         pos2(rect.left() + 7.0, rect.center().y - 2.0),

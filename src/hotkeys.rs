@@ -11,12 +11,20 @@ pub enum Action {
     Quieter,
     Mute,
     NextOutput,
+    PrevOutput,
     Mixer,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] =
-        [Action::Open, Action::Louder, Action::Quieter, Action::Mute, Action::NextOutput, Action::Mixer];
+    pub const ALL: [Action; 7] = [
+        Action::Open,
+        Action::Louder,
+        Action::Quieter,
+        Action::Mute,
+        Action::NextOutput,
+        Action::PrevOutput,
+        Action::Mixer,
+    ];
 
     /// Имя в `settings.txt`.
     pub fn key(self) -> &'static str {
@@ -26,6 +34,7 @@ impl Action {
             Action::Quieter => "quieter",
             Action::Mute => "mute",
             Action::NextOutput => "next_output",
+            Action::PrevOutput => "prev_output",
             Action::Mixer => "mixer",
         }
     }
@@ -210,11 +219,16 @@ pub fn vk(k: Key) -> Option<u32> {
 }
 
 /// Следующее устройство вывода по кругу (порядок — как в списке устройств).
-pub fn next_output<'a>(ids: &[&'a str], current: Option<&str>) -> Option<&'a str> {
+pub fn next_output<'a>(ids: &[&'a str], current: Option<&str>, forward: bool) -> Option<&'a str> {
     if ids.is_empty() {
         return None;
     }
-    let i = current.and_then(|c| ids.iter().position(|id| *id == c)).map_or(0, |i| (i + 1) % ids.len());
+    let n = ids.len();
+    let i = match current.and_then(|c| ids.iter().position(|id| *id == c)) {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None => 0,
+    };
     Some(ids[i])
 }
 
@@ -263,11 +277,15 @@ mod tests {
     #[test]
     fn next_output_cycles() {
         let ids = ["a", "b", "c"];
-        assert_eq!(next_output(&ids, Some("a")), Some("b"));
-        assert_eq!(next_output(&ids, Some("c")), Some("a"));
-        assert_eq!(next_output(&ids, None), Some("a"));
-        assert_eq!(next_output(&ids, Some("zz")), Some("a"));
-        assert_eq!(next_output(&[], Some("a")), None);
+        assert_eq!(next_output(&ids, Some("a"), true), Some("b"));
+        assert_eq!(next_output(&ids, Some("c"), true), Some("a"));
+        assert_eq!(next_output(&ids, None, true), Some("a"));
+        assert_eq!(next_output(&ids, Some("zz"), true), Some("a"));
+        assert_eq!(next_output(&[], Some("a"), true), None);
+        // Назад: с первого — на последнее.
+        assert_eq!(next_output(&ids, Some("a"), false), Some("c"));
+        assert_eq!(next_output(&ids, Some("b"), false), Some("a"));
+        assert_eq!(Action::from_key("prev_output"), Some(Action::PrevOutput));
     }
 
     #[test]

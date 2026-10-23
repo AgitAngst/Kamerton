@@ -50,6 +50,8 @@ pub struct Settings {
     pub hotkeys: BTreeMap<Action, Combo>,
     /// Сочетания на программу: `apphotkey.<действие>.<путь exe в нижнем регистре>=<сочетание>`.
     pub app_hotkeys: BTreeMap<(AppAction, String), Combo>,
+    /// Сочетание на устройство — сделать его основным: `devhotkey.<id устройства>=<сочетание>`.
+    pub device_hotkeys: BTreeMap<String, Combo>,
     /// Запоминать громкость программ: `remember=1`.
     pub remember: bool,
     /// Громкость новых программ, проценты: `newapp_volume=50`; нет строки — выключено.
@@ -82,6 +84,7 @@ impl Default for Settings {
             expanded: false,
             hotkeys: BTreeMap::new(),
             app_hotkeys: BTreeMap::new(),
+            device_hotkeys: BTreeMap::new(),
             remember: true,
             new_app_volume: None,
             check_updates: true,
@@ -214,6 +217,12 @@ impl Settings {
                 if let (Some(a), Some(c)) = (Action::from_key(a), Combo::parse(v)) {
                     s.hotkeys.insert(a, c);
                 }
+            } else if let Some(id) = k.strip_prefix("devhotkey.") {
+                if let Some(c) = Combo::parse(v)
+                    && !id.is_empty()
+                {
+                    s.device_hotkeys.insert(id.to_string(), c);
+                }
             } else if let Some(rest) = k.strip_prefix("apphotkey.") {
                 if let Some((a, exe)) = rest.split_once('.')
                     && let (Some(a), Some(c)) = (AppAction::from_key(a), Combo::parse(v))
@@ -272,6 +281,9 @@ impl Settings {
         }
         for ((a, exe), c) in &self.app_hotkeys {
             out.push_str(&format!("apphotkey.{}.{}={}\n", a.key(), exe, c.to_text()));
+        }
+        for (id, c) in &self.device_hotkeys {
+            out.push_str(&format!("devhotkey.{id}={}\n", c.to_text()));
         }
         for (exe, (vol, muted)) in &self.memory {
             out.push_str(&format!("appvol={}|{}|{}\n", exe, pct(*vol), if *muted { 1 } else { 0 }));
@@ -349,6 +361,17 @@ mod tests {
             s.format(),
             "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
         );
+        assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn device_hotkeys_round_trip() {
+        let s = Settings::parse(
+            "devhotkey.{0.0.0.00000000}.{demo-1}=Ctrl+Alt+1\ndevhotkey.=Ctrl+Alt+2\nhotkey.prev_output=Ctrl+Alt+Left\n",
+        );
+        assert_eq!(s.device_hotkeys.len(), 1);
+        assert_eq!(s.device_hotkeys["{0.0.0.00000000}.{demo-1}"].to_text(), "Ctrl+Alt+1");
+        assert!(s.hotkeys.contains_key(&Action::PrevOutput));
         assert_eq!(Settings::parse(&s.format()), s);
     }
 

@@ -85,8 +85,11 @@ fn shown_apps(d: &Device) -> Vec<&App> {
 }
 
 /// Программы направления для микшера: сначала у устройства по умолчанию, затем у остальных.
+/// «Системные звуки» есть у каждого устройства — в микшере только у устройства по умолчанию.
 pub fn mixer_apps<'a>(devs: &[&'a Device]) -> Vec<(&'a Device, &'a App)> {
-    devs.iter().flat_map(|d| shown_apps(d).into_iter().map(move |a| (*d, a))).collect()
+    devs.iter()
+        .flat_map(|d| shown_apps(d).into_iter().filter(|a| !a.system || d.is_default).map(move |a| (*d, a)))
+        .collect()
 }
 
 /// Высота строк программ: нет программ — строка «Нет программ со звуком».
@@ -1588,9 +1591,11 @@ impl Flyout {
         }
         // Тянуть программу на другое устройство — за значок или имя.
         if snapshot.can_route && !a.system {
-            let handle = Rect::from_min_max(icon_rect.min, name_rect.max);
+            // Весь значок и имя: значок выше и ниже строки имени.
+            let handle = icon_rect.union(name_rect);
             let drag = ui.interact(handle, ui.id().with(("appdrag", key_id(&a.key))), Sense::drag());
-            if drag.drag_started() {
+            // Только левой кнопкой: правая — меню строки, она не должна начинать перенос.
+            if drag.drag_started_by(egui::PointerButton::Primary) {
                 egui::DragAndDrop::set_payload(&ctx, DragApp { key: a.key.clone(), name: name.clone(), flow });
             }
             if drag.hovered() || drag.dragged() {
@@ -1614,7 +1619,25 @@ impl Flyout {
             return;
         }
         let mut open_hotkeys = false;
+        // Меню программы: сначала куда её перенести — устройства сразу в меню, без подменю (в подменю
+        // трудно попасть), затем «без звука», сочетания, «Скрыть».
         row.context_menu(|ui| {
+            anvil_ui::widgets::section_label(ui, T::Device.get());
+            if !snapshot.can_route {
+                ui.add_enabled(false, egui::Button::new(T::RouteUnavailable.get()));
+            } else {
+                if check_item(ui, a.pinned.is_none(), T::AsSystem.get()) {
+                    let _ = self.control.move_app(a.key.clone(), None);
+                    ui.close();
+                }
+                for d in snapshot.devices.iter().filter(|d| d.flow == flow) {
+                    if check_item(ui, a.pinned.as_deref() == Some(d.id.as_str()), &d.name) {
+                        let _ = self.control.move_app(a.key.clone(), Some(d.id.clone()));
+                        ui.close();
+                    }
+                }
+            }
+            anvil_ui::widgets::menu_separator(ui);
             let text = if a.muted { T::Unmute.get() } else { T::Mute.get() };
             if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
                 let _ = self.control.set_muted(target.clone(), !a.muted);
@@ -1632,27 +1655,6 @@ impl Flyout {
                 st.save();
                 ui.close();
             }
-            anvil_ui::widgets::menu_separator(ui);
-            if !snapshot.can_route {
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(format!("{} ({})", T::Device.get(), T::RouteUnavailable.get())),
-                );
-                return;
-            }
-            ui.menu_button(T::Device.get(), |ui| {
-                if check_item(ui, a.pinned.is_none(), T::AsSystem.get()) {
-                    let _ = self.control.move_app(a.key.clone(), None);
-                    ui.close();
-                }
-                anvil_ui::widgets::menu_separator(ui);
-                for d in snapshot.devices.iter().filter(|d| d.flow == flow) {
-                    if check_item(ui, a.pinned.as_deref() == Some(d.id.as_str()), &d.name) {
-                        let _ = self.control.move_app(a.key.clone(), Some(d.id.clone()));
-                        ui.close();
-                    }
-                }
-            });
         });
         if open_hotkeys {
             self.page = Page::Hotkeys;
@@ -1908,5 +1910,13 @@ mod tests {
         let s = Snapshot { can_route: true, devices: vec![dev("a", false, 1), dev("b", true, 2)] };
         let order: Vec<&str> = mixer_apps(&outputs(&s)).iter().map(|(d, _)| d.id.as_str()).collect();
         assert_eq!(order, vec!["b", "b", "a"]);
+        // «Системные звуки» — только у устройства по умолчанию.
+        let mut a = dev("a", false, 1);
+        let mut b = dev("b", true, 1);
+        a.apps[0].system = true;
+        b.apps[0].system = true;
+        let s = Snapshot { can_route: true, devices: vec![a, b] };
+        let order: Vec<&str> = mixer_apps(&outputs(&s)).iter().map(|(d, _)| d.id.as_str()).collect();
+        assert_eq!(order, vec!["b"]);
     }
 }

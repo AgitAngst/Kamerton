@@ -49,6 +49,9 @@ const SLIDE_PX: f32 = 12.0;
 /// Окно микшера: ширина колонки устройства и строка баланса.
 const MIXER_COLUMN: f32 = 340.0;
 const BALANCE_ROW: f32 = 40.0;
+/// Поля окна микшера и его наименьший размер (точки).
+const MIXER_MARGIN: f32 = 16.0;
+const MIXER_MIN: [f32; 2] = [MIXER_COLUMN + 2.0 * MIXER_MARGIN, 200.0];
 const SLIDE_SECS: f32 = 0.18;
 /// Окно закрылось — щелчок по значку в эти мс его не открывает: это тот же щелчок, что снял фокус.
 const REOPEN_GUARD_MS: u64 = 300;
@@ -299,6 +302,8 @@ pub struct Flyout {
     mixer: bool,
     /// Куда поставили окно в последний раз (x, y, ширина, высота) — сверка после смены масштаба.
     placed: std::cell::Cell<Option<[i32; 4]>>,
+    /// Окно микшера: под какой размер содержимого (физические пиксели) его подогнали в последний раз.
+    fitted: std::cell::Cell<Option<[i32; 2]>>,
     /// Блоки устройств на этом кадре — цели перетаскивания.
     targets: Vec<(String, Flow, Rect)>,
 }
@@ -398,6 +403,7 @@ impl Flyout {
             all: Snapshot::default(),
             mixer: false,
             placed: std::cell::Cell::new(None),
+            fitted: std::cell::Cell::new(None),
             targets: Vec::new(),
         }
     }
@@ -428,52 +434,73 @@ impl Flyout {
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
         let p = Palette::of_ctx(&ctx);
         self.targets.clear();
-        let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(16));
+        let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(MIXER_MARGIN as i8));
+        let mut content = Vec2::ZERO;
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(12.0, 0.0);
-                    let mut devs: Vec<&Device> = outputs(&snapshot);
-                    devs.extend(of_flow(&snapshot, Flow::Capture));
-                    for d in devs {
-                        ui.allocate_ui_with_layout(
-                            vec2(MIXER_COLUMN, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                anvil_ui::widgets::card(ui, |ui| {
-                                    ui.set_width(MIXER_COLUMN - 32.0);
-                                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                                    let top = ui.cursor().top();
-                                    let peak = peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0);
-                                    self.device_row(ui, d, peak);
-                                    if let Some(b) = d.balance {
-                                        self.balance_row(ui, d, b);
-                                    }
-                                    let apps = shown_apps(d);
-                                    if apps.is_empty() {
-                                        note_row(ui, T::NoApps.get());
-                                    }
-                                    for a in apps {
-                                        let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
-                                        self.app_row(ui, a, d.flow, &snapshot, peak);
-                                    }
-                                    let block = Rect::from_min_max(
-                                        pos2(ui.min_rect().left(), top),
-                                        pos2(ui.min_rect().right(), ui.cursor().top()),
-                                    );
-                                    self.targets.push((d.id.clone(), d.flow, block));
-                                });
-                            },
-                        );
-                    }
-                });
+                content = ui
+                    .horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(12.0, 0.0);
+                        let mut devs: Vec<&Device> = outputs(&snapshot);
+                        devs.extend(of_flow(&snapshot, Flow::Capture));
+                        for d in devs {
+                            ui.allocate_ui_with_layout(
+                                vec2(MIXER_COLUMN, ui.available_height()),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    anvil_ui::widgets::card(ui, |ui| {
+                                        ui.set_width(MIXER_COLUMN - 32.0);
+                                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                        let top = ui.cursor().top();
+                                        let peak = peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0);
+                                        self.device_row(ui, d, peak);
+                                        if let Some(b) = d.balance {
+                                            self.balance_row(ui, d, b);
+                                        }
+                                        let apps = shown_apps(d);
+                                        if apps.is_empty() {
+                                            note_row(ui, T::NoApps.get());
+                                        }
+                                        for a in apps {
+                                            let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
+                                            self.app_row(ui, a, d.flow, &snapshot, peak);
+                                        }
+                                        let block = Rect::from_min_max(
+                                            pos2(ui.min_rect().left(), top),
+                                            pos2(ui.min_rect().right(), ui.cursor().top()),
+                                        );
+                                        self.targets.push((d.id.clone(), d.flow, block));
+                                    });
+                                },
+                            );
+                        }
+                    })
+                    .response
+                    .rect
+                    .size();
             });
         });
+        self.fit_mixer(&ctx, content);
         self.finish_drag(&ctx);
         if self.snap_check(&ctx) {
             return;
         }
         ctx.request_repaint_after(Duration::from_millis(33));
+    }
+
+    /// Окно микшера по размеру колонок: сколько устройств — столько колонок, высота — по самой длинной.
+    /// Больше экрана не растёт: дальше — прокрутка.
+    fn fit_mixer(&self, ctx: &egui::Context, content: Vec2) {
+        let ppp = ctx.pixels_per_point();
+        let w = (content.x + 2.0 * MIXER_MARGIN).max(MIXER_MIN[0]);
+        let h = (content.y + 2.0 * MIXER_MARGIN).max(MIXER_MIN[1]);
+        let want = [(w * ppp).ceil() as i32, (h * ppp).ceil() as i32];
+        if self.fitted.get() == Some(want) {
+            return;
+        }
+        self.fitted.set(Some(want));
+        // Снимок для проверки рисуется за экранами — туда окно и остаётся.
+        sys::fit_client(self.hwnd, want, std::env::var_os("KAMERTON_SNAP").is_none());
     }
 
     /// Баланс устройства: «Л» — ползунок — «П».
@@ -620,7 +647,7 @@ impl crate::shell::Content for Flyout {
     }
 
     fn close_requested(&mut self) -> bool {
-        // Окно микшера: запомнить место и размер.
+        // Окно микшера: запомнить место (размер подгоняется под содержимое).
         if self.mixer {
             if let Some(r) = sys::window_rect(self.hwnd) {
                 let mut st = self.shared.settings.lock().unwrap();

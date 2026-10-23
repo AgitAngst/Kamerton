@@ -184,7 +184,8 @@ fn run_mixer() -> Result<(), String> {
             title,
             size: [960.0, 560.0],
             decorations: true,
-            resizable: true,
+            // Размер — по числу устройств и программ (`Flyout::fit_mixer`).
+            resizable: false,
             always_on_top: false,
             skip_taskbar: false,
             // Снимок для проверки вида — за экранами и без фокуса, не мешая пользователю.

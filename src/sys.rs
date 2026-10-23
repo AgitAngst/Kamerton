@@ -187,6 +187,33 @@ pub fn place_normal(raw: isize, r: [i32; 4]) {
     }
 }
 
+/// Подогнать окно под размер содержимого `[ширина, высота]` (физические пиксели клиентской части):
+/// не больше рабочей области монитора; `keep_on_screen` — сдвинуть, чтобы окно не вылезало за край.
+pub fn fit_client(raw: isize, client: [i32; 2], keep_on_screen: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    let Some(win) = window_rect(raw) else { return };
+    let mut c = RECT::default();
+    if unsafe { GetClientRect(hwnd(raw), &mut c) }.is_err() {
+        return;
+    }
+    // Рамка и заголовок — разница окна и его клиентской части.
+    let (dw, dh) = ((win.right - win.left) - (c.right - c.left), (win.bottom - win.top) - (c.bottom - c.top));
+    let (_, work, _) = monitor_at((win.left + win.right) / 2, (win.top + win.bottom) / 2);
+    let w = (client[0] + dw).min(work.right - work.left);
+    let h = (client[1] + dh).min(work.bottom - work.top);
+    let (mut x, mut y) = (win.left, win.top);
+    if keep_on_screen {
+        x = x.min(work.right - w).max(work.left);
+        y = y.min(work.bottom - h).max(work.top);
+    }
+    if [x, y, w, h] == [win.left, win.top, win.right - win.left, win.bottom - win.top] {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(hwnd(raw), None, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
 /// Найти окно по заголовку и вывести наверх (второй `--mixer`).
 pub fn raise_window(title: &str) -> bool {
     let t = wide(title);

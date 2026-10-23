@@ -1229,7 +1229,8 @@ impl Flyout {
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
             let number = Rect::from_min_max(pos2(row.right() - NUMBER_W, row.top()), row.max);
             let track = Rect::from_min_max(row.min - vec2(7.0, 0.0), pos2(number.left() - 3.0, row.bottom()));
-            let out = slider(ui, ui.id().with("newapp"), track, value, false, 0.0);
+            // Всегда ровная шкала: 50 — посередине (владелец, 23.10.2026).
+            let out = slider_scaled(ui, ui.id().with("newapp"), track, value, false, 0.0, false);
             let v = out.value.unwrap_or(value);
             number_text(ui, number, v, false);
             st.new_app_volume = Some(model::percent(v) as u8);

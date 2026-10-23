@@ -1046,6 +1046,14 @@ impl Flyout {
             st.hidden_devices.remove(&d);
         }
 
+        ui.add_space(10.0);
+        anvil_ui::widgets::section_label(ui, T::About.get());
+        let mut about = format!("Kamerton {}", env!("CARGO_PKG_VERSION"));
+        if crate::config::portable_dir().is_some() {
+            about = format!("{about} · {}", T::Portable.get());
+        }
+        anvil_ui::widgets::note(ui, &about);
+
         if st != before {
             if st.theme != before.theme {
                 anvil_ui::choose(&ctx, theme_choice(st.theme));

@@ -102,7 +102,7 @@ fn crash_line(unix: u64, version: &str, place: &str, message: &str) -> String {
     format!("{unix} v{version} {place}: {}\n", message.replace(['\r', '\n'], " "))
 }
 
-/// Паника — строка в `%APPDATA%\Kamerton\crash.log`, потом обычный вывод Rust.
+/// Паника — строка в `crash.log` рядом с настройками, потом обычный вывод Rust.
 fn install_crash_log() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -114,8 +114,7 @@ fn install_crash_log() {
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_default();
         let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        if let Some(base) = std::env::var_os("APPDATA") {
-            let dir = std::path::PathBuf::from(base).join("Kamerton");
+        if let Some(dir) = config::data_dir() {
             let _ = std::fs::create_dir_all(&dir);
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {

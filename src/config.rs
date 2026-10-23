@@ -1,4 +1,5 @@
-// Настройки: `%APPDATA%\Kamerton\settings.txt`, строки `ключ=значение`. Неизвестные строки сохраняются
+// Настройки: `%APPDATA%\Kamerton\settings.txt` (переносная копия — `settings.txt` рядом с exe),
+// строки `ключ=значение`. Неизвестные строки сохраняются
 // как есть — их могла записать более новая версия. Без зависимостей.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,8 +86,22 @@ impl Default for Settings {
 }
 
 fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(base).join("Kamerton").join("settings.txt"))
+    Some(data_dir()?.join("settings.txt"))
+}
+
+/// Папка exe, если программа переносная (рядом с exe лежит `settings.txt`).
+pub fn portable_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    dir.join("settings.txt").is_file().then_some(dir)
+}
+
+/// Где лежат настройки и `crash.log`: рядом с exe у переносной копии, иначе `%APPDATA%\Kamerton`.
+pub fn data_dir() -> Option<PathBuf> {
+    pick_dir(portable_dir(), std::env::var_os("APPDATA").map(PathBuf::from))
+}
+
+fn pick_dir(portable: Option<PathBuf>, appdata: Option<PathBuf>) -> Option<PathBuf> {
+    portable.or_else(|| appdata.map(|a| a.join("Kamerton")))
 }
 
 fn percent(v: &str) -> Option<f32> {
@@ -284,6 +299,21 @@ impl Settings {
         if let Err(e) = std::fs::write(&p, self.format()) {
             eprintln!("settings: cannot write {}: {e}", p.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod dir_tests {
+    use super::pick_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn data_dir_choice() {
+        let exe = PathBuf::from(r"C:\Tools\Kamerton");
+        let app = PathBuf::from(r"C:\Users\demo\AppData\Roaming");
+        assert_eq!(pick_dir(Some(exe.clone()), Some(app.clone())), Some(exe));
+        assert_eq!(pick_dir(None, Some(app.clone())), Some(app.join("Kamerton")));
+        assert_eq!(pick_dir(None, None), None);
     }
 }
 

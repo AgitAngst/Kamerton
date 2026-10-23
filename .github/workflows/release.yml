@@ -1,0 +1,20 @@
+# Выпуск Kamerton — только по тегу vX.Y.Z (ставит владелец или мастер выпуска Anvil).
+# Общий workflow семьи Anvil: сборка под Windows, kamerton-X.Y.Z-windows-x64.zip, SHA256SUMS,
+# GitHub Release с заметками из аннотации тега; подпись exe — если заведены секреты SIGN_PFX и
+# SIGN_PASSWORD. Тег набора — тот же, что у anvil-ui в Cargo.toml.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: AgitAngst/Anvil/.github/workflows/rust-release.yml@kit-v0.6.1
+    with:
+      app: kamerton
+      bins: kamerton
+    secrets: inherit

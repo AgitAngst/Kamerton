@@ -94,6 +94,8 @@ pub enum T {
     WheelOutside,
     LogScale,
     Autostart,
+    About,
+    Portable,
     Hidden,
     NothingHidden,
     Show,
@@ -107,7 +109,7 @@ pub enum T {
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 70] = [
+    pub const ALL: [T; 72] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -169,6 +171,8 @@ impl T {
         T::WheelOutside,
         T::LogScale,
         T::Autostart,
+        T::About,
+        T::Portable,
         T::Hidden,
         T::NothingHidden,
         T::Show,
@@ -247,6 +251,8 @@ impl T {
             T::WheelOutside => ("Колесо вне окна меняет громкость", "Wheel outside the window changes volume"),
             T::LogScale => ("Логарифмическая шкала", "Logarithmic scale"),
             T::Autostart => ("Запускать при входе в Windows", "Start with Windows"),
+            T::About => ("О программе", "About"),
+            T::Portable => ("Переносная копия: настройки рядом с exe", "Portable copy: settings next to the exe"),
             T::Hidden => ("Скрытое", "Hidden"),
             T::NothingHidden => ("Ничего не скрыто", "Nothing is hidden"),
             T::Show => ("Показать", "Show"),

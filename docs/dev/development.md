@@ -65,6 +65,15 @@ powershell -ExecutionPolicy Bypass -File scripts/quit.ps1
 
 Не убивать процесс `taskkill`: значок останется «призраком» в трее до наведения мыши.
 
+## Упаковка и выпуск
+
+- `powershell -File scripts\package.ps1` — release-сборка и `target\package\kamerton-X.Y.Z-windows-x64.zip`
+  с `SHA256SUMS`, как у выпуска; ничего не публикует. `-NoBuild` — упаковать готовый exe.
+- Выпуск — тег `vX.Y.Z` на коммите с той же версией в `Cargo.toml` (только по команде владельца):
+  `.github/workflows/release.yml` вызывает общий workflow Anvil, публикует архив и `SHA256SUMS`, подписывает
+  exe, если в репозитории есть секреты `SIGN_PFX`/`SIGN_PASSWORD`. Заметки — из аннотации тега
+  (`git tag -a vX.Y.Z --cleanup=verbatim -F notes.md`).
+
 ## Живая проверка
 
 - `kamerton --list` — сверить список с панелью звука Windows.

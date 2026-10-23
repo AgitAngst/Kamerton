@@ -1053,6 +1053,9 @@ impl Flyout {
             about = format!("{about} · {}", T::Portable.get());
         }
         anvil_ui::widgets::note(ui, &about);
+        if let Some(u) = crate::update::get() {
+            self.update_block(ui, u, &mut st);
+        }
 
         if st != before {
             if st.theme != before.theme {
@@ -1066,6 +1069,77 @@ impl Flyout {
             st.save();
             *self.shared.settings.lock().unwrap() = st;
         }
+    }
+
+    /// «О программе»: состояние обновления, кнопка по состоянию, выключатели.
+    fn update_block(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
+        use anvil_update::State;
+        let ctx = ui.ctx().clone();
+        let state = u.state();
+        if let Some(line) = anvil_update::ui::about_status(&ctx, u) {
+            anvil_ui::widgets::note(ui, line);
+        }
+        if let State::Downloading { done, total, .. } = &state {
+            anvil_ui::widgets::progress(ui, (*total > 0).then(|| *done as f32 / *total as f32), 180.0);
+        }
+        ui.horizontal(|ui| match &state {
+            State::Available(up) if up.asset.is_some() => {
+                if anvil_ui::widgets::button(
+                    ui,
+                    anvil_ui::Kind::Primary,
+                    Some(anvil_ui::Icon::Download),
+                    T::UpdateNow.get(),
+                )
+                .clicked()
+                {
+                    u.install();
+                }
+                if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::SkipVersion.get()).clicked() {
+                    st.skip_version = Some(up.version.to_string());
+                    u.dismiss();
+                }
+            }
+            State::Ready { .. } => {
+                if anvil_ui::widgets::button(
+                    ui,
+                    anvil_ui::Kind::Primary,
+                    Some(anvil_ui::Icon::Refresh),
+                    T::RestartNow.get(),
+                )
+                .clicked()
+                    && let Err(e) = crate::update::restart(crate::tray::hwnd())
+                {
+                    eprintln!("update: restart failed: {e}");
+                }
+            }
+            State::Failed { update: Some(_), .. } => {
+                if anvil_ui::widgets::button(
+                    ui,
+                    anvil_ui::Kind::Secondary,
+                    Some(anvil_ui::Icon::Refresh),
+                    T::Retry.get(),
+                )
+                .clicked()
+                {
+                    u.install();
+                }
+            }
+            State::Checking | State::Downloading { .. } => {}
+            _ => {
+                if anvil_ui::widgets::button(
+                    ui,
+                    anvil_ui::Kind::Secondary,
+                    Some(anvil_ui::Icon::Refresh),
+                    T::CheckNow.get(),
+                )
+                .clicked()
+                {
+                    crate::update::check_now(st);
+                }
+            }
+        });
+        anvil_ui::widgets::switch(ui, &mut st.check_updates, T::CheckUpdates.get());
+        anvil_ui::widgets::switch(ui, &mut st.prerelease, T::Prerelease.get());
     }
 
     fn profiles_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {

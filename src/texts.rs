@@ -96,6 +96,16 @@ pub enum T {
     Autostart,
     About,
     Portable,
+    CheckUpdates,
+    Prerelease,
+    CheckNow,
+    UpdateNow,
+    SkipVersion,
+    RestartNow,
+    Retry,
+    MenuUpdate,
+    MenuRestart,
+
     Hidden,
     NothingHidden,
     Show,
@@ -109,7 +119,7 @@ pub enum T {
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 72] = [
+    pub const ALL: [T; 81] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -173,6 +183,15 @@ impl T {
         T::Autostart,
         T::About,
         T::Portable,
+        T::CheckUpdates,
+        T::Prerelease,
+        T::CheckNow,
+        T::UpdateNow,
+        T::SkipVersion,
+        T::RestartNow,
+        T::Retry,
+        T::MenuUpdate,
+        T::MenuRestart,
         T::Hidden,
         T::NothingHidden,
         T::Show,
@@ -252,6 +271,16 @@ impl T {
             T::LogScale => ("Логарифмическая шкала", "Logarithmic scale"),
             T::Autostart => ("Запускать при входе в Windows", "Start with Windows"),
             T::About => ("О программе", "About"),
+            T::CheckUpdates => ("Проверять обновления", "Check for updates"),
+            T::Prerelease => ("Предлагать пред-выпуски", "Offer pre-releases"),
+            T::CheckNow => ("Проверить сейчас", "Check now"),
+            T::UpdateNow => ("Обновить", "Update"),
+            T::SkipVersion => ("Пропустить", "Skip"),
+            T::RestartNow => ("Перезапустить", "Restart"),
+            T::Retry => ("Повторить", "Retry"),
+            T::MenuUpdate => ("Обновить до", "Update to"),
+            T::MenuRestart => ("Перезапустить на", "Restart into"),
+
             T::Portable => ("Переносная копия: настройки рядом с exe", "Portable copy: settings next to the exe"),
             T::Hidden => ("Скрытое", "Hidden"),
             T::NothingHidden => ("Ничего не скрыто", "Nothing is hidden"),

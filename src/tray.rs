@@ -48,6 +48,8 @@ const WM_RELOAD_HOTKEYS: u32 = WM_APP + 4;
 const WM_TIMER: u32 = 0x0113;
 /// Таймер отложенной записи настроек (память громкости меняется часто — пишем не чаще раза в 2 с).
 const SAVE_TIMER: usize = 1;
+/// Раз в минуту — не пора ли проверить обновления.
+const UPDATE_TIMER: usize = 2;
 const WM_HOTKEY: u32 = 0x0312;
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_CONSOLE_CONNECT: usize = 0x1;
@@ -66,6 +68,8 @@ const CMD_PLAYBACK: u32 = 4;
 const CMD_RECORDING: u32 = 5;
 const CMD_SOUNDS: u32 = 6;
 const CMD_KMIXER: u32 = 7;
+const CMD_UPDATE: u32 = 8;
+const CMD_RESTART: u32 = 9;
 /// Пункты устройств: `CMD_DEVICE + номер` в списке устройств вывода.
 const CMD_DEVICE: u32 = 100;
 /// Пункты профилей: `CMD_PROFILE + номер`.
@@ -329,6 +333,11 @@ fn start_cycle(hwnd: HWND) {
     });
 }
 
+/// Окно трея (0 — трей не запущен).
+pub fn hwnd() -> isize {
+    TRAY_HWND.load(Ordering::SeqCst)
+}
+
 /// Шаг громкости сочетаний — как колесо: 2 %.
 const STEP: f32 = 0.02;
 
@@ -380,6 +389,7 @@ fn run(control: Control, shared: Arc<Shared>) {
             return;
         };
         TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        let _ = SetTimer(Some(hwnd), UPDATE_TIMER, 60_000, None);
         add_icon(hwnd);
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!("trace: tray icon rect {:?}", icon_rect(hwnd));
@@ -650,6 +660,13 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
             let w = sys::wide(text);
             let _ = AppendMenuW(m, flags, id, PCWSTR(w.as_ptr()));
         };
+        if let Some(v) = crate::update::ready() {
+            add(menu, MF_STRING, CMD_RESTART as usize, &format!("{} Kamerton {v}", T::MenuRestart.get()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        } else if let Some(v) = crate::update::available() {
+            add(menu, MF_STRING, CMD_UPDATE as usize, &format!("{} Kamerton {v}", T::MenuUpdate.get()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        }
         let hidden = ctx.shared.settings.lock().unwrap().hidden_devices.clone();
         let devices: Vec<(String, String, bool)> =
             menu_devices(&ctx.control).into_iter().filter(|(id, _, _)| !hidden.contains(id)).collect();
@@ -692,6 +709,16 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32) {
             CMD_RECORDING => sys::run("control.exe", "mmsys.cpl,,1"),
             CMD_SOUNDS => sys::run("control.exe", "mmsys.cpl,,2"),
             CMD_KMIXER => open_mixer(),
+            CMD_UPDATE => {
+                if let Some(u) = crate::update::get() {
+                    u.install();
+                }
+            }
+            CMD_RESTART => {
+                if let Err(e) = crate::update::restart(hwnd.0 as isize) {
+                    eprintln!("update: restart failed: {e}");
+                }
+            }
             c if c >= CMD_PROFILE => run_profile(&ctx.shared, &ctx.control, (c - CMD_PROFILE) as usize),
             c if c >= CMD_DEVICE => {
                 if let Some((id, _, _)) = devices.get((c - CMD_DEVICE) as usize) {
@@ -749,6 +776,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_REFRESH => {
                 update_look(hwnd);
                 react_to_changes(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == UPDATE_TIMER => {
+                let settings = ctx.shared.settings.lock().unwrap().clone();
+                crate::update::tick(&settings);
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == SAVE_TIMER => {

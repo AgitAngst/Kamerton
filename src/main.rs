@@ -18,6 +18,7 @@ mod snap;
 mod sys;
 mod texts;
 mod tray;
+mod update;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -127,7 +128,17 @@ fn install_crash_log() {
 
 /// Трей: значок и ядро звука, без окна и OpenGL. Второй экземпляр молча выходит.
 fn run_tray() -> Result<(), String> {
-    let Some(_instance) = sys::single_instance() else {
+    // После «Перезапустить» старый процесс ещё выходит — подождать, пока он отпустит «один экземпляр».
+    let patience = if std::env::var_os(update::RESTARTED).is_some() { 50 } else { 0 };
+    let mut instance = sys::single_instance();
+    for _ in 0..patience {
+        if instance.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        instance = sys::single_instance();
+    }
+    let Some(_instance) = instance else {
         return Ok(());
     };
     texts::init();
@@ -143,6 +154,14 @@ fn run_tray() -> Result<(), String> {
             })
             .map_err(|e| e.to_string())?;
             let shared = std::sync::Arc::new(flyout::Shared::new(ctx.clone(), hwnd));
+            let repaint = ctx.clone();
+            let trace = std::env::var_os("KAMERTON_TRACE").is_some();
+            update::init(move || {
+                if trace && let Some(u) = update::get() {
+                    eprintln!("trace: update {:?}", u.state());
+                }
+                repaint.request_repaint();
+            });
             tray::start(audio.control(), shared.clone());
             Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, &snapshot, shared)) as Box<dyn shell::Content>)
         }),
@@ -187,6 +206,10 @@ fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
     shell::run(
         shell::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
         Box::new(move |ctx, hwnd| {
+            // Снимок страницы настроек показывает и блок обновлений (без сети: проверка только по кнопке).
+            if std::env::var_os("KAMERTON_SNAP").is_some() {
+                update::init(|| {});
+            }
             flyout::Flyout::standalone(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn shell::Content>)
         }),
     )

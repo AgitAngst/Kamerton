@@ -58,6 +58,12 @@ pub struct Settings {
     pub memory: Memory,
     /// Профили: `profile.<N>.name|output|input|on_connect=…`, `profile.<N>.app=<exe>|<проценты>|<0|1>|<устройство или ->`.
     pub profiles: Vec<Profile>,
+    /// Проверять обновления при запуске и раз в сутки: `updates=1`.
+    pub check_updates: bool,
+    /// Предлагать пред-выпуски: `prerelease=1`.
+    pub prerelease: bool,
+    /// Пропущенная версия: `skip_version=1.2.3`.
+    pub skip_version: Option<String>,
     /// Строки, которых эта версия не знает.
     other: Vec<String>,
 }
@@ -78,6 +84,9 @@ impl Default for Settings {
             app_hotkeys: BTreeMap::new(),
             remember: true,
             new_app_volume: None,
+            check_updates: true,
+            prerelease: false,
+            skip_version: None,
             memory: Memory::new(),
             profiles: Vec::new(),
             other: Vec::new(),
@@ -163,6 +172,12 @@ impl Settings {
                 }
             } else if k == "remember" {
                 s.remember = v == "1" || v.eq_ignore_ascii_case("true");
+            } else if k == "updates" {
+                s.check_updates = v == "1" || v.eq_ignore_ascii_case("true");
+            } else if k == "prerelease" {
+                s.prerelease = v == "1" || v.eq_ignore_ascii_case("true");
+            } else if k == "skip_version" {
+                s.skip_version = opt(v);
             } else if k == "newapp_volume" {
                 s.new_app_volume = v.parse::<u8>().ok().filter(|p| *p <= 100);
             } else if k == "appvol" {
@@ -244,6 +259,11 @@ impl Settings {
             out.push_str(&format!("mixer_rect={x},{y},{w},{h}\n"));
         }
         out.push_str(&format!("remember={}\n", if self.remember { 1 } else { 0 }));
+        out.push_str(&format!("updates={}\n", if self.check_updates { 1 } else { 0 }));
+        out.push_str(&format!("prerelease={}\n", if self.prerelease { 1 } else { 0 }));
+        if let Some(v) = &self.skip_version {
+            out.push_str(&format!("skip_version={v}\n"));
+        }
         if let Some(v) = self.new_app_volume {
             out.push_str(&format!("newapp_volume={v}\n"));
         }
@@ -327,9 +347,18 @@ mod tests {
         assert!(s.expanded);
         assert_eq!(
             s.format(),
-            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nremember=1\nfuture=yes\n# note\n"
+            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
         );
         assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn update_settings_round_trip() {
+        let s = Settings::parse("updates=0\nprerelease=1\nskip_version=1.2.3\n");
+        assert!(!s.check_updates && s.prerelease);
+        assert_eq!(s.skip_version.as_deref(), Some("1.2.3"));
+        assert_eq!(Settings::parse(&s.format()), s);
+        assert!(Settings::parse("").check_updates);
     }
 
     #[test]

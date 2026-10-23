@@ -27,15 +27,22 @@ use crate::texts::T;
 pub const WIDTH: f32 = 360.0;
 pub const PAD_X: f32 = 16.0;
 pub const PAD_Y: f32 = 12.0;
+/// Строка устройства в колонке окна микшера (`--mixer`).
 pub const DEVICE_ROW: f32 = 52.0;
-pub const APP_ROW: f32 = 44.0;
+pub const APP_ROW: f32 = 50.0;
+/// Окно у значка (вид «Вывод звука» Windows 11): отступ сверху, заголовок раздела, строка устройства
+/// в списке и зазор между ними, черта между разделами, заголовок микшера, отступ снизу, полоса внизу.
+pub const TOP: f32 = 10.0;
+pub const HEADER_ROW: f32 = 36.0;
+pub const ITEM_ROW: f32 = 56.0;
+pub const ITEM_GAP: f32 = 2.0;
+pub const DIVIDER: f32 = 9.0;
+pub const MIXER_HEADER: f32 = 40.0;
+pub const BOTTOM: f32 = 8.0;
+/// Строки списка устройств отступают от края окна на 4, всё остальное — на `PAD_X`.
+const INSET: f32 = 4.0;
 pub const EMPTY_ROW: f32 = 30.0;
-/// Между блоками устройств: отступ, линия, отступ.
-pub const SECTION_GAP: f32 = 6.0 * 2.0 + 1.0;
-/// Подпись «ЗАПИСЬ» над устройствами записи.
-pub const LABEL_ROW: f32 = 28.0;
-/// Низ окна: отступ и кнопка «Все устройства» / «Только основное».
-pub const FOOTER: f32 = 6.0 + 30.0;
+pub const FOOTER: f32 = 48.0;
 const NUMBER_W: f32 = 34.0;
 const BUTTON: f32 = 30.0;
 const ICON: f32 = 24.0;
@@ -60,14 +67,6 @@ const HIDDEN: u8 = 0;
 const OPENING: u8 = 1;
 const OPEN: u8 = 2;
 
-/// Что стоит в окне сверху вниз.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Block<'a> {
-    Device(&'a Device),
-    /// Подпись «ЗАПИСЬ» перед устройствами записи.
-    RecordingLabel,
-}
-
 /// Устройства одного направления: по умолчанию — первым.
 fn of_flow(s: &Snapshot, flow: Flow) -> Vec<&Device> {
     let mut v: Vec<&Device> = s.devices.iter().filter(|d| d.flow == flow).collect();
@@ -80,52 +79,42 @@ pub fn outputs(s: &Snapshot) -> Vec<&Device> {
     of_flow(s, Flow::Render)
 }
 
-/// Блоки окна. Свёрнуто — только устройство вывода по умолчанию; развёрнуто — все устройства вывода,
-/// затем подпись и устройства записи.
-pub fn blocks(s: &Snapshot, expanded: bool) -> Vec<Block<'_>> {
-    let outs = outputs(s);
-    if !expanded {
-        return outs.into_iter().take(1).map(Block::Device).collect();
-    }
-    let mut v: Vec<Block> = outs.into_iter().map(Block::Device).collect();
-    let ins = of_flow(s, Flow::Capture);
-    if !ins.is_empty() {
-        v.push(Block::RecordingLabel);
-        v.extend(ins.into_iter().map(Block::Device));
-    }
-    v
-}
-
 /// Программы устройства в окне: у записи — без «Системных звуков».
 fn shown_apps(d: &Device) -> Vec<&App> {
     d.apps.iter().filter(|a| !(d.flow == Flow::Capture && a.system)).collect()
 }
 
-/// Высота содержимого окна: от неё место окна считается ещё до кадра.
+/// Программы направления для микшера: сначала у устройства по умолчанию, затем у остальных.
+pub fn mixer_apps<'a>(devs: &[&'a Device]) -> Vec<(&'a Device, &'a App)> {
+    devs.iter().flat_map(|d| shown_apps(d).into_iter().map(move |a| (*d, a))).collect()
+}
+
+/// Высота строк программ: нет программ — строка «Нет программ со звуком».
+fn apps_height(n: usize) -> f32 {
+    if n == 0 { EMPTY_ROW } else { n as f32 * APP_ROW }
+}
+
+/// Высота содержимого окна: от неё место окна считается ещё до кадра. Сверху вниз: «Устройство вывода»
+/// и список, черта, «Микшер громкости» и программы; развёрнуто — ещё «Устройство ввода», список и
+/// программы записи; внизу — полоса.
 pub fn content_height(s: &Snapshot, expanded: bool) -> f32 {
-    let list = blocks(s, expanded);
-    if list.is_empty() {
-        return 2.0 * PAD_Y + EMPTY_ROW + FOOTER;
+    let outs = outputs(s);
+    let ins = if expanded { of_flow(s, Flow::Capture) } else { Vec::new() };
+    if outs.is_empty() && ins.is_empty() {
+        return TOP + EMPTY_ROW + BOTTOM + FOOTER;
     }
-    let mut h = 0.0;
-    let mut prev_device = false;
-    for b in &list {
-        match b {
-            Block::Device(d) => {
-                if prev_device {
-                    h += SECTION_GAP;
-                }
-                let n = shown_apps(d).len();
-                h += DEVICE_ROW + if n == 0 { EMPTY_ROW } else { n as f32 * APP_ROW };
-                prev_device = true;
-            }
-            Block::RecordingLabel => {
-                h += SECTION_GAP + LABEL_ROW;
-                prev_device = false;
-            }
+    let mut h = TOP;
+    if !outs.is_empty() {
+        h += HEADER_ROW + outs.len() as f32 * (ITEM_ROW + ITEM_GAP);
+        h += DIVIDER + MIXER_HEADER + apps_height(mixer_apps(&outs).len());
+    }
+    if !ins.is_empty() {
+        if !outs.is_empty() {
+            h += DIVIDER;
         }
+        h += HEADER_ROW + ins.len() as f32 * (ITEM_ROW + ITEM_GAP) + apps_height(mixer_apps(&ins).len());
     }
-    2.0 * PAD_Y + h + FOOTER
+    h + BOTTOM + FOOTER
 }
 
 /// Программу тянут на другое устройство.
@@ -463,7 +452,7 @@ impl Flyout {
                                         }
                                         for a in apps {
                                             let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
-                                            self.app_row(ui, a, d.flow, &snapshot, peak);
+                                            self.app_row(ui, a, d.flow, &snapshot, peak, None);
                                         }
                                         let block = Rect::from_min_max(
                                             pos2(ui.min_rect().left(), top),
@@ -735,6 +724,9 @@ impl crate::shell::Content for Flyout {
             .stroke(Stroke::new(1.0, p.border_strong))
             .corner_radius(radius::WINDOW)
             .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
+        // Страница микшера: поля у каждой части свои (список устройств — 4, остальное — 16), полоса внизу
+        // во всю ширину.
+        let bare = frame.inner_margin(egui::Margin::ZERO);
         self.targets.clear();
         if self.page != Page::Mixer {
             let shown = egui::CentralPanel::default()
@@ -761,47 +753,31 @@ impl crate::shell::Content for Flyout {
             }
             return;
         }
-        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let list: Vec<Block> = blocks(&snapshot, self.shared.expanded());
-                if list.is_empty() {
-                    note_row(ui, T::NoDevices.get());
-                }
-                let mut prev_device = false;
-                for b in &list {
-                    match b {
-                        Block::RecordingLabel => {
-                            gap(ui);
-                            label_row(ui, T::Recording.get());
-                            prev_device = false;
-                        }
-                        Block::Device(d) => {
-                            if prev_device {
-                                gap(ui);
-                            }
-                            prev_device = true;
-                            let top = ui.cursor().top();
-                            let peak = peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0);
-                            self.device_row(ui, d, peak);
-                            let apps = shown_apps(d);
-                            if apps.is_empty() {
-                                note_row(ui, T::NoApps.get());
-                            }
-                            for a in apps {
-                                let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
-                                self.app_row(ui, a, d.flow, &snapshot, peak);
-                            }
-                            let block = Rect::from_min_max(
-                                pos2(ui.min_rect().left(), top),
-                                pos2(ui.min_rect().right(), ui.cursor().top()),
-                            );
-                            self.targets.push((d.id.clone(), d.flow, block));
-                        }
+        egui::CentralPanel::default().frame(bare).show(ui, |ui| {
+            let full = ui.max_rect();
+            let foot = Rect::from_min_max(pos2(full.left(), full.bottom() - FOOTER), full.max);
+            let body = Rect::from_min_max(full.min, pos2(full.right(), foot.top()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    ui.add_space(TOP);
+                    let outs = outputs(&snapshot);
+                    let ins = if self.shared.expanded() { of_flow(&snapshot, Flow::Capture) } else { Vec::new() };
+                    if outs.is_empty() && ins.is_empty() {
+                        padded(ui, PAD_X, |ui| note_row(ui, T::NoDevices.get()));
                     }
-                }
-                self.footer(ui);
+                    if !outs.is_empty() {
+                        self.section(ui, &outs, T::OutputDevice.get(), &peaks, &snapshot, true);
+                    }
+                    if !ins.is_empty() {
+                        if !outs.is_empty() {
+                            divider_row(ui);
+                        }
+                        self.section(ui, &ins, T::InputDevice.get(), &peaks, &snapshot, false);
+                    }
+                });
             });
+            self.footer(ui, foot);
         });
         self.finish_drag(ctx);
         if self.snap_check(ctx) {
@@ -1318,23 +1294,31 @@ impl Flyout {
     }
 }
 
-fn gap(ui: &mut Ui) {
-    ui.add_space(6.0);
-    anvil_ui::widgets::divider(ui);
-    ui.add_space(6.0);
-}
-
-/// Подпись раздела, как `section_label` набора, но в строке точной высоты.
-fn label_row(ui: &mut Ui, text: &str) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), LABEL_ROW), Sense::hover());
+/// Заголовок раздела окна у значка: полужирный 14, `text`, с полем 16.
+fn section_title(ui: &mut Ui, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_ROW), Sense::hover());
     let p = Palette::of(ui);
     ui.painter().text(
-        pos2(rect.left(), rect.center().y),
+        pos2(rect.left() + PAD_X, rect.center().y + 2.0),
         Align2::LEFT_CENTER,
-        text.to_uppercase(),
-        anvil_ui::semibold(11.0),
-        p.weak,
+        text,
+        anvil_ui::semibold(14.0),
+        p.text,
     );
+}
+
+/// Черта между разделами: 4 + 1 + 4, с полями 16.
+fn divider_row(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), DIVIDER), Sense::hover());
+    let p = Palette::of(ui);
+    let y = rect.center().y;
+    ui.painter()
+        .line_segment([pos2(rect.left() + PAD_X, y), pos2(rect.right() - PAD_X, y)], Stroke::new(1.0, p.border));
+}
+
+/// Содержимое с полями слева и справа.
+fn padded<R>(ui: &mut Ui, x: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(x as i8, 0)).show(ui, add).inner
 }
 
 /// Пункт меню с отметкой текущего.
@@ -1344,43 +1328,191 @@ fn check_item(ui: &mut Ui, checked: bool, text: &str) -> bool {
 }
 
 impl Flyout {
-    fn footer(&mut self, ui: &mut Ui) {
-        ui.add_space(6.0);
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    /// Раздел направления: заголовок, список устройств; у вывода — черта и «Микшер громкости» с
+    /// шестерёнкой; затем программы (не на устройстве по умолчанию — с подписью «→ устройство»).
+    fn section(
+        &mut self,
+        ui: &mut Ui,
+        devs: &[&Device],
+        title: &str,
+        peaks: &HashMap<Target, f32>,
+        snapshot: &Snapshot,
+        mixer_header: bool,
+    ) {
+        section_title(ui, title);
+        padded(ui, INSET, |ui| {
+            for d in devs {
+                let peak = peaks.get(&Target::Device(d.id.clone())).copied().unwrap_or(0.0);
+                self.device_item(ui, d, peak);
+                ui.add_space(ITEM_GAP);
+            }
+        });
+        if mixer_header {
+            divider_row(ui);
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), MIXER_HEADER), Sense::hover());
+            let p = Palette::of(ui);
+            ui.painter().text(
+                pos2(rect.left() + PAD_X, rect.center().y),
+                Align2::LEFT_CENTER,
+                T::VolumeMixer.get(),
+                anvil_ui::semibold(14.0),
+                p.text,
+            );
+            let gear =
+                Rect::from_center_size(pos2(rect.right() - 8.0 - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
+            let clicked = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(gear), |ui| {
+                    anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Settings.get()).clicked()
+                })
+                .inner;
+            if clicked {
+                self.page = Page::Settings;
+                self.focus_app = None;
+            }
+        }
+        let apps = mixer_apps(devs);
+        padded(ui, PAD_X, |ui| {
+            if apps.is_empty() {
+                note_row(ui, T::NoApps.get());
+            }
+            for (d, a) in apps {
+                let peak = peaks.get(&Target::App(a.key.clone())).copied().unwrap_or(0.0);
+                let dest = (!d.is_default).then_some(d.name.as_str());
+                self.app_row(ui, a, d.flow, snapshot, peak, dest);
+            }
+        });
+    }
+
+    /// Полоса внизу: «Другие параметры звука», справа «Профили» и «Показать/Скрыть устройства ввода».
+    fn footer(&mut self, ui: &mut Ui, rect: Rect) {
+        let p = Palette::of(ui);
+        // Внутри рамки окна: снизу углы скруглены, как у окна.
+        let fill = Rect::from_min_max(rect.min + vec2(1.0, 0.0), rect.max - vec2(1.0, 1.0));
+        let round = radius::WINDOW.saturating_sub(1);
+        ui.painter().rect_filled(fill, CornerRadius { nw: 0, ne: 0, sw: round, se: round }, p.bg);
+        ui.painter().line_segment([fill.left_top(), fill.right_top()], Stroke::new(1.0, p.border));
         let expanded = self.shared.expanded();
-        let (icon, text) = if expanded {
-            (anvil_ui::Icon::ChevronUp, T::DefaultOnly.get())
-        } else {
-            (anvil_ui::Icon::ArrowDown, T::AllDevices.get())
-        };
-        let (clicked, gear) = ui
+        let link = T::MoreSettings.get();
+        let galley = ui.painter().layout_no_wrap(link.to_string(), FontId::proportional(13.0), p.text);
+        let link_rect =
+            Rect::from_min_size(pos2(rect.left() + PAD_X, rect.center().y - galley.size().y / 2.0), galley.size());
+        let r = ui.interact(link_rect.expand(4.0), ui.id().with("more-settings"), Sense::click());
+        let color = if r.hovered() { p.accent_text } else { p.text };
+        ui.painter().galley(link_rect.min, galley, color);
+        if r.hovered() {
+            ui.painter().line_segment(
+                [link_rect.left_bottom() + vec2(0.0, 1.0), link_rect.right_bottom() + vec2(0.0, 1.0)],
+                Stroke::new(1.0, color),
+            );
+        }
+        anvil_ui::widgets::focus_ring(ui, link_rect.expand(4.0), &r, radius::CONTROL);
+        if r.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            sys::open("ms-settings:sound");
+        }
+        let buttons =
+            Rect::from_min_max(pos2(link_rect.right() + 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
+        let (toggle, profiles) = ui
             .scope_builder(
-                egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                egui::UiBuilder::new().max_rect(buttons).layout(egui::Layout::right_to_left(egui::Align::Center)),
                 |ui| {
-                    let c = anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, Some(icon), text).clicked();
-                    let g = ui
-                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let g =
-                                anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Settings.get()).clicked();
-                            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Layers, T::Profiles.get()).clicked() {
-                                self.page = Page::Profiles;
-                            }
-                            g
-                        })
-                        .inner;
-                    (c, g)
+                    let (icon, hint) = if expanded {
+                        (anvil_ui::Icon::ChevronUp, T::HideInputs.get())
+                    } else {
+                        (anvil_ui::Icon::ArrowDown, T::ShowInputs.get())
+                    };
+                    let t = anvil_ui::widgets::icon_button(ui, icon, hint).clicked();
+                    let pr = anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Layers, T::Profiles.get()).clicked();
+                    (t, pr)
                 },
             )
             .inner;
-        if clicked {
+        if toggle {
             let mut s = self.shared.settings.lock().unwrap();
             s.expanded = !s.expanded;
             s.save();
         }
-        if gear {
-            self.page = Page::Settings;
-            self.focus_app = None;
+        if profiles {
+            self.page = Page::Profiles;
         }
+    }
+
+    /// Строка списка устройств: значок, имя, под ним ползунок; справа число и «без звука». Устройство по
+    /// умолчанию подсвечено и отмечено чертой акцента слева; щелчок по строке делает устройство основным.
+    fn device_item(&mut self, ui: &mut Ui, d: &Device, peak: f32) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ITEM_ROW), Sense::hover());
+        let row = ui.interact(rect, ui.id().with(("devitem", &d.id)), Sense::click());
+        let p = Palette::of(ui);
+        if d.is_default || row.hovered() {
+            ui.painter().rect_filled(rect, radius::CONTROL, p.raised);
+        }
+        if d.is_default {
+            let pill = Rect::from_center_size(pos2(rect.left() + 1.5, rect.center().y), vec2(3.0, 16.0));
+            ui.painter().rect_filled(pill, CornerRadius::same(2), p.accent);
+        }
+        let kind = icons::device_kind(&d.name, d.flow == Flow::Capture);
+        let glyph = Rect::from_center_size(pos2(rect.left() + 12.0 + 8.0, rect.center().y), Vec2::splat(16.0));
+        icons::device(ui.painter(), glyph, p.text, kind);
+        let left = glyph.right() + 12.0;
+        let button =
+            Rect::from_center_size(pos2(rect.right() - 6.0 - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
+        let number = Rect::from_min_max(
+            pos2(button.left() - 8.0 - NUMBER_W, rect.top()),
+            pos2(button.left() - 8.0, rect.bottom()),
+        );
+        let font = if d.is_default { anvil_ui::semibold(14.0) } else { FontId::proportional(14.0) };
+        let name_rect = Rect::from_min_max(pos2(left, rect.top() + 7.0), pos2(number.left() - 8.0, rect.top() + 27.0));
+        text_clipped(ui, name_rect, &d.name, font, p.text);
+        let track =
+            Rect::from_min_max(pos2(left - 7.0, rect.top() + 30.0), pos2(number.left() - 10.0, rect.top() + 46.0));
+        let target = Target::Device(d.id.clone());
+        let shown = self.shown_value(&target, d.volume);
+        let out = slider(ui, ui.id().with(("dev", &d.id)), track, shown, d.muted, peak);
+        if let Some(v) = out.value {
+            self.set_volume(target.clone(), v);
+        }
+        if out.released {
+            sys::beep();
+        }
+        number_text(ui, number, shown, d.muted);
+        let mute = mute_button(ui, button, ui.id().with(("devmute", &d.id)), shown, d.muted).clicked();
+        if mute || out.toggle_mute {
+            let _ = self.control.set_muted(target.clone(), !d.muted);
+        }
+        if row.clicked() && !d.is_default {
+            let _ = self.control.set_default(&d.id, Roles::All);
+        }
+        if row.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        self.targets.push((d.id.clone(), d.flow, rect));
+        self.device_menu(&row, d);
+    }
+
+    /// Меню строки устройства (правый щелчок): по умолчанию, связь, «без звука», скрыть.
+    fn device_menu(&mut self, row: &egui::Response, d: &Device) {
+        let target = Target::Device(d.id.clone());
+        row.context_menu(|ui| {
+            if check_item(ui, d.is_default, T::MakeDefault.get()) {
+                let _ = self.control.set_default(&d.id, Roles::All);
+                ui.close();
+            }
+            if check_item(ui, d.is_comm, T::MakeComm.get()) {
+                let _ = self.control.set_default(&d.id, Roles::Communications);
+                ui.close();
+            }
+            anvil_ui::widgets::menu_separator(ui);
+            let text = if d.muted { T::Unmute.get() } else { T::Mute.get() };
+            if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
+                let _ = self.control.set_muted(target.clone(), !d.muted);
+                ui.close();
+            }
+            if anvil_ui::widgets::menu_item(ui, None, T::Hide.get(), None).clicked() {
+                let mut st = self.shared.settings.lock().unwrap();
+                st.hidden_devices.insert(d.id.clone());
+                st.save();
+                ui.close();
+            }
+        });
     }
 
     fn device_row(&mut self, ui: &mut Ui, d: &Device, peak: f32) {
@@ -1413,31 +1545,10 @@ impl Flyout {
         if mute || out.toggle_mute {
             let _ = self.control.set_muted(target.clone(), !d.muted);
         }
-        row.context_menu(|ui| {
-            if check_item(ui, d.is_default, T::MakeDefault.get()) {
-                let _ = self.control.set_default(&d.id, Roles::All);
-                ui.close();
-            }
-            if check_item(ui, d.is_comm, T::MakeComm.get()) {
-                let _ = self.control.set_default(&d.id, Roles::Communications);
-                ui.close();
-            }
-            anvil_ui::widgets::menu_separator(ui);
-            let text = if d.muted { T::Unmute.get() } else { T::Mute.get() };
-            if anvil_ui::widgets::menu_item(ui, None, text, Some("M")).clicked() {
-                let _ = self.control.set_muted(target.clone(), !d.muted);
-                ui.close();
-            }
-            if anvil_ui::widgets::menu_item(ui, None, T::Hide.get(), None).clicked() {
-                let mut st = self.shared.settings.lock().unwrap();
-                st.hidden_devices.insert(d.id.clone());
-                st.save();
-                ui.close();
-            }
-        });
+        self.device_menu(&row, d);
     }
 
-    fn app_row(&mut self, ui: &mut Ui, a: &App, flow: Flow, snapshot: &Snapshot, peak: f32) {
+    fn app_row(&mut self, ui: &mut Ui, a: &App, flow: Flow, snapshot: &Snapshot, peak: f32, dest: Option<&str>) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), APP_ROW), Sense::hover());
         let row = ui.interact(rect, ui.id().with(("approw", key_id(&a.key))), Sense::click());
         let p = Palette::of(ui);
@@ -1461,8 +1572,20 @@ impl Flyout {
         );
         let left = icon_rect.right() + 10.0;
         let name = if a.system { T::SystemSounds.get().to_string() } else { a.name.clone() };
-        let name_rect = Rect::from_min_max(pos2(left, rect.top() + 4.0), pos2(number.left() - 8.0, rect.top() + 22.0));
-        text_clipped(ui, name_rect, &name, FontId::proportional(14.0), p.text);
+        let name_rect = Rect::from_min_max(pos2(left, rect.top() + 6.0), pos2(number.left() - 8.0, rect.top() + 24.0));
+        let name_color = if a.muted { p.weak } else { p.text };
+        match dest {
+            // Программа на другом устройстве: имя — не больше 60 % строки, рядом мелко «→ устройство».
+            Some(dest) => {
+                let w = ui.painter().layout_no_wrap(name.clone(), FontId::proportional(14.0), name_color).size().x;
+                let split = (name_rect.left() + w.min(name_rect.width() * 0.6)).round();
+                let name_part = Rect::from_min_max(name_rect.min, pos2(split, name_rect.bottom()));
+                text_clipped(ui, name_part, &name, FontId::proportional(14.0), name_color);
+                let rest = Rect::from_min_max(pos2(split + 6.0, name_rect.top() + 1.0), name_rect.max);
+                text_clipped(ui, rest, &format!("→ {dest}"), FontId::proportional(11.5), p.weak);
+            }
+            None => text_clipped(ui, name_rect, &name, FontId::proportional(14.0), name_color),
+        }
         // Тянуть программу на другое устройство — за значок или имя.
         if snapshot.can_route && !a.system {
             let handle = Rect::from_min_max(icon_rect.min, name_rect.max);
@@ -1474,7 +1597,8 @@ impl Flyout {
                 ctx.set_cursor_icon(if drag.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
             }
         }
-        let track = Rect::from_min_max(pos2(left, rect.top() + 24.0), pos2(number.left() - 10.0, rect.top() + 40.0));
+        let track =
+            Rect::from_min_max(pos2(left - 7.0, rect.top() + 27.0), pos2(number.left() - 10.0, rect.top() + 43.0));
         let target = Target::App(a.key.clone());
         let shown = self.shown_value(&target, a.volume);
         let out = slider(ui, ui.id().with(("app", key_id(&a.key))), track, shown, a.muted, peak);
@@ -1556,7 +1680,11 @@ impl Flyout {
             }
         }
         if let Some(pt) = pointer {
-            layer.text(pt + vec2(14.0, 4.0), Align2::LEFT_TOP, &drag.name, FontId::proportional(13.0), p.text);
+            let galley = layer.layout_no_wrap(drag.name.clone(), FontId::proportional(13.0), p.text);
+            let card = Rect::from_min_size(pt + vec2(14.0, 6.0), galley.size() + vec2(20.0, 12.0));
+            layer.rect_filled(card, radius::CONTROL, p.card);
+            layer.rect_stroke(card, radius::CONTROL, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
+            layer.galley(card.min + vec2(10.0, 6.0), galley, p.text);
         }
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);
@@ -1693,7 +1821,7 @@ fn slider(ui: &mut Ui, id: egui::Id, rect: Rect, value: f32, muted: bool, peak: 
     // Положение на дорожке — по шкале; громкость и число — как есть.
     let pos = model::to_pos(v, log);
     let fill = if muted { p.faint } else { p.accent };
-    ui.painter().rect_filled(track, CornerRadius::same(2), p.raised);
+    ui.painter().rect_filled(track, CornerRadius::same(2), p.border_strong);
     let filled = Rect::from_min_max(track.min, pos2(track.left() + track.width() * pos, track.bottom()));
     ui.painter().rect_filled(filled, CornerRadius::same(2), fill);
     if !muted && peak > 0.0 {
@@ -1765,36 +1893,20 @@ mod tests {
         let mut mic = dev("mic", true, 1);
         mic.flow = Flow::Capture;
         mic.apps[0].system = true;
-        let s = Snapshot { can_route: true, devices: vec![dev("a", true, 2), dev("b", false, 0), mic] };
-        let collapsed = 2.0 * PAD_Y + (DEVICE_ROW + 2.0 * APP_ROW) + FOOTER;
-        assert_eq!(content_height(&s, false), collapsed);
-        // Развёрнуто: оба вывода, подпись записи, микрофон без «Системных звуков» — «нет программ».
-        let expanded = 2.0 * PAD_Y
-            + (DEVICE_ROW + 2.0 * APP_ROW)
-            + SECTION_GAP
-            + (DEVICE_ROW + EMPTY_ROW)
-            + SECTION_GAP
-            + LABEL_ROW
-            + (DEVICE_ROW + EMPTY_ROW)
-            + FOOTER;
-        assert_eq!(content_height(&s, true), expanded);
-        assert_eq!(content_height(&Snapshot::default(), true), 2.0 * PAD_Y + EMPTY_ROW + FOOTER);
+        let s = Snapshot { can_route: true, devices: vec![dev("a", true, 2), dev("b", false, 1), mic] };
+        // Свёрнуто: оба вывода в списке, в микшере программы обоих (2 + 1).
+        let outs = HEADER_ROW + 2.0 * (ITEM_ROW + ITEM_GAP) + DIVIDER + MIXER_HEADER + 3.0 * APP_ROW;
+        assert_eq!(content_height(&s, false), TOP + outs + BOTTOM + FOOTER);
+        // Развёрнуто: ещё раздел ввода; у микрофона «Системные звуки» не показываются — «нет программ».
+        let ins = DIVIDER + HEADER_ROW + (ITEM_ROW + ITEM_GAP) + EMPTY_ROW;
+        assert_eq!(content_height(&s, true), TOP + outs + ins + BOTTOM + FOOTER);
+        assert_eq!(content_height(&Snapshot::default(), true), TOP + EMPTY_ROW + BOTTOM + FOOTER);
     }
 
     #[test]
-    fn collapsed_shows_default_output_only() {
-        let mut mic = dev("mic", true, 0);
-        mic.flow = Flow::Capture;
-        let s = Snapshot { can_route: true, devices: vec![dev("a", false, 0), dev("b", true, 0), mic] };
-        let ids = |v: Vec<Block>| -> Vec<String> {
-            v.into_iter()
-                .map(|b| match b {
-                    Block::Device(d) => d.id.clone(),
-                    Block::RecordingLabel => "-".into(),
-                })
-                .collect()
-        };
-        assert_eq!(ids(blocks(&s, false)), vec!["b"]);
-        assert_eq!(ids(blocks(&s, true)), vec!["b", "a", "-", "mic"]);
+    fn mixer_lists_default_device_apps_first() {
+        let s = Snapshot { can_route: true, devices: vec![dev("a", false, 1), dev("b", true, 2)] };
+        let order: Vec<&str> = mixer_apps(&outputs(&s)).iter().map(|(d, _)| d.id.as_str()).collect();
+        assert_eq!(order, vec!["b", "b", "a"]);
     }
 }

@@ -127,3 +127,86 @@ pub fn speaker(painter: &Painter, rect: Rect, color: Color32, level: f32, muted:
         painter.add(eframe::egui::Shape::line(points, stroke));
     }
 }
+
+/// Вид устройства для значка в списке — по имени, которое дала Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    Speakers,
+    Headphones,
+    Display,
+    Mic,
+}
+
+pub fn device_kind(name: &str, capture: bool) -> DeviceKind {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if capture {
+        DeviceKind::Mic
+    } else if has(&["headphone", "headset", "earphone", "наушник", "гарнитур"]) {
+        DeviceKind::Headphones
+    } else if has(&["hdmi", "displayport", "monitor", "display", "монитор", "дисплей"]) {
+        DeviceKind::Display
+    } else {
+        DeviceKind::Speakers
+    }
+}
+
+/// Значок устройства линиями в сетке 24 × 24: колонка, наушники, монитор, микрофон.
+pub fn device(painter: &Painter, rect: Rect, color: Color32, kind: DeviceKind) {
+    let s = rect.width() / 24.0;
+    let p = |x: f32, y: f32| -> Pos2 { pos2(rect.left() + x * s, rect.top() + y * s) };
+    let stroke = Stroke::new((1.6 * s).max(1.2), color);
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32, round: f32| {
+        painter.rect_stroke(
+            Rect::from_min_max(p(x0, y0), p(x1, y1)),
+            eframe::egui::CornerRadius::same((round * s) as u8),
+            stroke,
+            eframe::egui::StrokeKind::Middle,
+        );
+    };
+    let arc = |cx: f32, cy: f32, rad: f32, from: f32, to: f32| {
+        let pts: Vec<Pos2> = (0..=16)
+            .map(|k| {
+                let a = from + (to - from) * k as f32 / 16.0;
+                let c = p(cx, cy);
+                pos2(c.x + rad * s * a.cos(), c.y + rad * s * a.sin())
+            })
+            .collect();
+        painter.add(eframe::egui::Shape::line(pts, stroke));
+    };
+    match kind {
+        DeviceKind::Speakers => {
+            r(6.0, 3.0, 18.0, 21.0, 2.0);
+            painter.circle_stroke(p(12.0, 14.0), 3.0 * s, stroke);
+            painter.circle_stroke(p(12.0, 7.5), 1.0 * s, stroke);
+        }
+        DeviceKind::Headphones => {
+            arc(12.0, 13.0, 8.0, std::f32::consts::PI, 2.0 * std::f32::consts::PI);
+            r(3.0, 14.0, 7.0, 20.0, 1.5);
+            r(17.0, 14.0, 21.0, 20.0, 1.5);
+        }
+        DeviceKind::Display => {
+            r(3.0, 4.0, 21.0, 16.0, 2.0);
+            painter.line_segment([p(9.0, 20.0), p(15.0, 20.0)], stroke);
+            painter.line_segment([p(12.0, 16.0), p(12.0, 20.0)], stroke);
+        }
+        DeviceKind::Mic => {
+            r(9.0, 3.0, 15.0, 14.0, 3.0);
+            arc(12.0, 11.0, 6.0, 0.0, std::f32::consts::PI);
+            painter.line_segment([p(12.0, 17.0), p(12.0, 21.0)], stroke);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceKind, device_kind};
+
+    #[test]
+    fn kind_from_name() {
+        assert_eq!(device_kind("Наушники (USB Headset)", false), DeviceKind::Headphones);
+        assert_eq!(device_kind("Monitor (HDMI Audio)", false), DeviceKind::Display);
+        assert_eq!(device_kind("Speakers (Demo Audio)", false), DeviceKind::Speakers);
+        assert_eq!(device_kind("Headset Microphone", true), DeviceKind::Mic);
+    }
+}

@@ -1453,7 +1453,10 @@ impl Flyout {
             anvil_ui::widgets::note(ui, T::IconColorNote.get());
         }
 
-        if settings_search::any(&query, &[Item::Animation, Item::WheelOutside, Item::LogScale, Item::Osd]) {
+        if settings_search::any(
+            &query,
+            &[Item::Animation, Item::WheelOutside, Item::LogScale, Item::Osd, Item::MixerOnTop],
+        ) {
             ui.add_space(10.0);
             anvil_ui::widgets::section_label(ui, T::WindowSection.get());
         }
@@ -1468,6 +1471,9 @@ impl Flyout {
         }
         if show(Item::Osd) {
             anvil_ui::widgets::switch(ui, &mut st.osd, T::Osd.get());
+        }
+        if show(Item::MixerOnTop) {
+            anvil_ui::widgets::switch(ui, &mut st.mixer_on_top, T::MixerOnTop.get());
         }
 
         if show(Item::Autostart) {
@@ -1817,6 +1823,19 @@ impl Flyout {
         let mut device_on = st.limit_device.is_some();
         anvil_ui::widgets::switch(ui, &mut device_on, T::LimitDevice.get());
         st.limit_device = device_on.then(|| percent_slider(ui, "limit-device", st.limit_device.unwrap_or(80), 1, 99));
+        // Ночью тише: часы и потолок на это время.
+        anvil_ui::widgets::switch(ui, &mut st.night, T::NightSwitch.get());
+        if st.night {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(T::NightFrom.get()).size(13.0));
+                time_combo(ui, "night-from", &mut st.night_from);
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(T::NightTo.get()).size(13.0));
+                time_combo(ui, "night-to", &mut st.night_to);
+            });
+            ui.label(egui::RichText::new(T::NightLimit.get()).size(13.0));
+            st.night_limit = percent_slider(ui, "night-limit", st.night_limit, 1, 99);
+        }
         let mut drop_cap = None;
         for (exe, cap) in st.limit_apps.iter_mut() {
             ui.horizontal(|ui| {
@@ -2135,6 +2154,15 @@ fn hotkey_caption(ui: &mut Ui) {
         FontId::proportional(11.5),
         p.weak,
     );
+}
+
+/// Время суток списком с шагом 30 минут; другое число минут из файла показывается как есть.
+fn time_combo(ui: &mut Ui, id: &str, minutes: &mut u16) {
+    egui::ComboBox::from_id_salt(id).selected_text(rules::time_text(*minutes)).width(86.0).show_ui(ui, |ui| {
+        for m in (0..24 * 60).step_by(30) {
+            ui.selectable_value(minutes, m as u16, rules::time_text(m as u16));
+        }
+    });
 }
 
 /// Ползунок процентов с числом в строке 30 (всегда ровная шкала): значение `lo..=hi`.

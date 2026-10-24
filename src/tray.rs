@@ -264,7 +264,7 @@ fn react_to_changes(hwnd: HWND) {
     // Потолок — по снимку, а не по событиям: проверяется и при запуске, и после правки настроек.
     let (limit_device, limit_apps) = {
         let st = ctx.shared.settings.lock().unwrap();
-        (st.limit_device, st.limit_apps.clone())
+        (rules::device_cap(st.limit_device, st.night(), sys::local_minutes()), st.limit_apps.clone())
     };
     run_cmds(&ctx.control, rules::limit_cmds(&now, limit_device, &limit_apps));
     let Some(prev) = prev else { return };
@@ -967,6 +967,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == UPDATE_TIMER => {
+                // Раз в минуту — ещё и граница часов ночного потолка.
+                refresh();
                 let settings = ctx.shared.settings.lock().unwrap().clone();
                 crate::update::tick(&settings);
                 LRESULT(0)

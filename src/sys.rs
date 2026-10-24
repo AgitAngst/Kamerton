@@ -112,6 +112,13 @@ pub fn post_close(raw: isize) {
     }
 }
 
+/// Местное время: минуты от полуночи.
+pub fn local_minutes() -> u16 {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let t = unsafe { GetLocalTime() };
+    t.wHour * 60 + t.wMinute
+}
+
 /// Окно не берёт фокус от щелчка (стиль `WS_EX_NOACTIVATE`) — для плашки громкости.
 pub fn set_no_activate(raw: isize, on: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{

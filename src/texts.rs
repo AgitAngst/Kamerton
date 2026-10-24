@@ -170,11 +170,16 @@ pub enum T {
     RuleMute,
     PickApp,
     DeleteRuleConfirm,
+    NightSwitch,
+    NightFrom,
+    NightTo,
+    NightLimit,
+    MixerOnTop,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 132] = [
+    pub const ALL: [T; 137] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -307,6 +312,11 @@ impl T {
         T::RuleMute,
         T::PickApp,
         T::DeleteRuleConfirm,
+        T::NightSwitch,
+        T::NightFrom,
+        T::NightTo,
+        T::NightLimit,
+        T::MixerOnTop,
     ];
 
     /// (русский, английский)
@@ -464,6 +474,11 @@ impl T {
             T::RuleMute => ("Выключить звук", "Mute"),
             T::PickApp => ("Выберите программу", "Pick an app"),
             T::DeleteRuleConfirm => ("Удалить правило?", "Delete the rule?"),
+            T::NightSwitch => ("Ночью тише", "Quieter at night"),
+            T::NightFrom => ("С", "From"),
+            T::NightTo => ("До", "To"),
+            T::NightLimit => ("Потолок ночью", "Night limit"),
+            T::MixerOnTop => ("Окно микшера поверх всех окон", "Mixer window on top of other windows"),
         }
     }
 

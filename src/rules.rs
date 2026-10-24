@@ -173,6 +173,45 @@ pub fn rule_cmds(events: &[Event], s: &Snapshot, rules: &[AppRule]) -> Vec<Cmd> 
     out
 }
 
+/// Ночной режим: часы (минуты от полуночи, местные) и потолок общей громкости на это время.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Night {
+    pub from: u16,
+    pub to: u16,
+    pub limit: u8,
+}
+
+/// Попадает ли `now` в часы `[from, to)`: `from < to` — в один день, `from > to` — через полночь, равные — никогда.
+pub fn in_window(from: u16, to: u16, now: u16) -> bool {
+    if from == to {
+        false
+    } else if from < to {
+        from <= now && now < to
+    } else {
+        now >= from || now < to
+    }
+}
+
+/// Потолок устройства по умолчанию сейчас: в часы ночи — меньший из дневного и ночного, иначе — дневной.
+pub fn device_cap(day: Option<u8>, night: Option<Night>, now: u16) -> Option<u8> {
+    match night.filter(|n| in_window(n.from, n.to, now)) {
+        Some(n) => Some(day.map_or(n.limit, |d| d.min(n.limit))),
+        None => day,
+    }
+}
+
+/// `HH:MM` из минут от полуночи.
+pub fn time_text(minutes: u16) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// Минуты от полуночи из `HH:MM`; `None` — не время.
+pub fn parse_time(s: &str) -> Option<u16> {
+    let (h, m) = s.trim().split_once(':')?;
+    let (h, m): (u16, u16) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
 /// Ключ программы для списка выбора: путь exe и показываемое имя (по первой встрече), у запущенных на выводе.
 pub fn running_apps(s: &Snapshot) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = Vec::new();
@@ -345,6 +384,43 @@ mod tests {
         assert!(rule_cmds(&[Event::AppAdded(sys)], &s, &[rule]).is_empty());
         let rule = AppRule { app: "game.exe".into(), volume: Some(10), ..Default::default() };
         assert!(rule_cmds(&[Event::AppAdded(rec)], &s, &[rule]).is_empty());
+    }
+
+    #[test]
+    fn night_window_in_one_day_and_across_midnight() {
+        let h = |h: u16| h * 60;
+        // 13:00–15:00
+        assert!(in_window(h(13), h(15), h(13)) && in_window(h(13), h(15), h(14) + 59));
+        assert!(!in_window(h(13), h(15), h(15)) && !in_window(h(13), h(15), h(12) + 59));
+        // 23:00–07:00 через полночь
+        assert!(in_window(h(23), h(7), h(23)) && in_window(h(23), h(7), 0) && in_window(h(23), h(7), h(6) + 59));
+        assert!(!in_window(h(23), h(7), h(7)) && !in_window(h(23), h(7), h(12)) && !in_window(h(23), h(7), h(22) + 59));
+        // Равные — пустое окно.
+        assert!(!in_window(h(8), h(8), h(8)) && !in_window(0, 0, 0));
+    }
+
+    #[test]
+    fn device_cap_is_the_lower_one_at_night() {
+        let night = Some(Night { from: 23 * 60, to: 7 * 60, limit: 40 });
+        assert_eq!(device_cap(None, None, 0), None);
+        assert_eq!(device_cap(Some(80), None, 0), Some(80));
+        // Ночью: без дневного потолка — ночной; с дневным — меньший.
+        assert_eq!(device_cap(None, night, 23 * 60), Some(40));
+        assert_eq!(device_cap(Some(80), night, 2 * 60), Some(40));
+        assert_eq!(device_cap(Some(30), night, 2 * 60), Some(30));
+        // Днём ночной потолок не действует.
+        assert_eq!(device_cap(None, night, 12 * 60), None);
+        assert_eq!(device_cap(Some(80), night, 12 * 60), Some(80));
+    }
+
+    #[test]
+    fn time_text_round_trip() {
+        assert_eq!(time_text(23 * 60 + 5), "23:05");
+        assert_eq!(parse_time("23:05"), Some(23 * 60 + 5));
+        assert_eq!(parse_time(" 7:00 "), Some(7 * 60));
+        for bad in ["24:00", "12:60", "12", "ab:cd", "", "-1:00"] {
+            assert_eq!(parse_time(bad), None, "{bad}");
+        }
     }
 
     #[test]

@@ -242,7 +242,7 @@ fn run_mixer() -> Result<(), String> {
             decorations: true,
             // Размер — по числу устройств и программ (`Flyout::fit_mixer`).
             resizable: false,
-            always_on_top: false,
+            always_on_top: settings.mixer_on_top,
             skip_taskbar: false,
             // Снимок для проверки вида — за экранами и без фокуса, не мешая пользователю.
             position: snapping.then_some([-4000, -4000]),

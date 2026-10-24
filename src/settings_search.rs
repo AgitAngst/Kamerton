@@ -18,13 +18,14 @@ pub enum Item {
     WheelOutside,
     LogScale,
     Osd,
+    MixerOnTop,
     Autostart,
     Hidden,
     About,
 }
 
 /// Все строки страницы по порядку.
-pub const ALL: [Item; 14] = [
+pub const ALL: [Item; 15] = [
     Item::Hotkeys,
     Item::Profiles,
     Item::Rules,
@@ -36,6 +37,7 @@ pub const ALL: [Item; 14] = [
     Item::WheelOutside,
     Item::LogScale,
     Item::Osd,
+    Item::MixerOnTop,
     Item::Autostart,
     Item::Hidden,
     Item::About,
@@ -48,7 +50,19 @@ fn words(item: Item) -> (&'static [T], &'static [&'static str]) {
         Item::Profiles => (&[T::Profiles], &["наборы", "preset"]),
         Item::Rules => (
             &[T::Rules, T::LimitSection, T::DuckSection, T::RulesSection],
-            &["потолок", "лимит", "limit", "ceiling", "приглушение", "duck", "правило", "rule"],
+            &[
+                "потолок",
+                "лимит",
+                "limit",
+                "ceiling",
+                "приглушение",
+                "duck",
+                "правило",
+                "rule",
+                "ночь",
+                "ночью",
+                "night",
+            ],
         ),
         Item::Theme => (
             &[T::Theme, T::Appearance, T::ThemeSystem, T::ThemeLight, T::ThemeDark],
@@ -64,6 +78,7 @@ fn words(item: Item) -> (&'static [T], &'static [&'static str]) {
         Item::WheelOutside => (&[T::WheelOutside, T::WindowSection], &["колесо", "wheel", "scroll"]),
         Item::LogScale => (&[T::LogScale, T::WindowSection], &["шкала", "scale", "logarithmic"]),
         Item::Osd => (&[T::Osd, T::WindowSection], &["osd", "плашка", "popup", "overlay"]),
+        Item::MixerOnTop => (&[T::MixerOnTop, T::WindowSection], &["микшер", "mixer", "поверх", "top"]),
         Item::Autostart => {
             (&[T::Autostart, T::ThemeSystem], &["автозапуск", "startup", "autostart", "boot", "windows"])
         }

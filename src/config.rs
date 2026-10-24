@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::hotkeys::{Action, AppAction, Combo};
 pub use crate::mark_render::IconColor;
 use crate::profiles::{AppState, Memory, Profile};
-use crate::rules::{AppRule, DeviceAct, When};
+use crate::rules::{AppRule, DeviceAct, Night, When};
 
 /// Тема окна.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -74,6 +74,13 @@ pub struct Settings {
     pub limit_device: Option<u8>,
     /// Потолки программ, проценты 1..99: `limit_app.<путь exe в нижнем регистре>=60`.
     pub limit_apps: BTreeMap<String, u8>,
+    /// Ночью тише: `night=1`, часы `night_from=23:00`, `night_to=07:00` и потолок `night_limit=40` на это время.
+    pub night: bool,
+    pub night_from: u16,
+    pub night_to: u16,
+    pub night_limit: u8,
+    /// Окно микшера поверх всех окон: `mixer_on_top=1`.
+    pub mixer_on_top: bool,
     /// Автоприглушение: `duck=1`.
     pub duck: bool,
     /// До какой доли своей громкости приглушать остальные, проценты 5..95: `duck_level=30`.
@@ -120,6 +127,11 @@ impl Default for Settings {
             device_hotkeys: BTreeMap::new(),
             limit_device: None,
             limit_apps: BTreeMap::new(),
+            night: false,
+            night_from: 23 * 60,
+            night_to: 7 * 60,
+            night_limit: 40,
+            mixer_on_top: false,
             duck: false,
             duck_level: 30,
             duck_apps: BTreeSet::new(),
@@ -174,6 +186,11 @@ fn opt(v: &str) -> Option<String> {
 }
 
 impl Settings {
+    /// Ночной режим, если включён.
+    pub fn night(&self) -> Option<Night> {
+        self.night.then_some(Night { from: self.night_from, to: self.night_to, limit: self.night_limit })
+    }
+
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
         let mut profiles: BTreeMap<usize, Profile> = BTreeMap::new();
@@ -250,6 +267,16 @@ impl Settings {
                 {
                     s.limit_apps.insert(exe.to_lowercase(), c);
                 }
+            } else if k == "night" {
+                s.night = on;
+            } else if k == "night_from" {
+                s.night_from = crate::rules::parse_time(v).unwrap_or(s.night_from);
+            } else if k == "night_to" {
+                s.night_to = crate::rules::parse_time(v).unwrap_or(s.night_to);
+            } else if k == "night_limit" {
+                s.night_limit = cap(v).unwrap_or(s.night_limit);
+            } else if k == "mixer_on_top" {
+                s.mixer_on_top = on;
             } else if k == "duck" {
                 s.duck = on;
             } else if k == "duck_level" {
@@ -378,6 +405,21 @@ impl Settings {
         }
         for (exe, c) in &self.limit_apps {
             out.push_str(&format!("limit_app.{exe}={c}\n"));
+        }
+        if self.night {
+            out.push_str("night=1\n");
+        }
+        if self.night_from != 23 * 60 {
+            out.push_str(&format!("night_from={}\n", crate::rules::time_text(self.night_from)));
+        }
+        if self.night_to != 7 * 60 {
+            out.push_str(&format!("night_to={}\n", crate::rules::time_text(self.night_to)));
+        }
+        if self.night_limit != 40 {
+            out.push_str(&format!("night_limit={}\n", self.night_limit));
+        }
+        if self.mixer_on_top {
+            out.push_str("mixer_on_top=1\n");
         }
         if self.duck {
             out.push_str("duck=1\n");
@@ -606,6 +648,20 @@ mod tests {
         assert_eq!(Settings::parse(&s.format()), s);
         let d = Settings::parse("");
         assert!(!d.duck && d.duck_level == 30 && d.limit_device.is_none() && d.rules.is_empty());
+    }
+
+    #[test]
+    fn night_and_mixer_on_top_round_trip() {
+        let d = Settings::parse("");
+        assert!(!d.night && d.night().is_none() && !d.mixer_on_top);
+        assert_eq!((d.night_from, d.night_to, d.night_limit), (23 * 60, 7 * 60, 40));
+        let s = Settings::parse("night=1\nnight_from=22:30\nnight_to=06:00\nnight_limit=25\nmixer_on_top=1\n");
+        assert_eq!(s.night(), Some(Night { from: 22 * 60 + 30, to: 6 * 60, limit: 25 }));
+        assert!(s.mixer_on_top);
+        assert_eq!(Settings::parse(&s.format()), s);
+        // Неразборчивое время и потолок — как по умолчанию.
+        let bad = Settings::parse("night=1\nnight_from=25:00\nnight_to=x\nnight_limit=100\n");
+        assert_eq!((bad.night_from, bad.night_to, bad.night_limit), (23 * 60, 7 * 60, 40));
     }
 
     #[test]

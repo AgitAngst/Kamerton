@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>Kamerton</title>
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="1024"><stop offset="0" stop-color="#C24FAE"/><stop offset="1" stop-color="#931A82"/></linearGradient>
+    <linearGradient id="ring" gradientUnits="userSpaceOnUse" x1="0" y1="21" x2="0" y2="1045"><stop offset="0" stop-color="#C24FAE"/><stop offset="1" stop-color="#931A82"/></linearGradient>
+  </defs>
+  <path id="bg" d="M 601.62 0 c 147.85 0 221.77 0 278.24 28.77 a 263.99 263.99 0 0 1 115.37 115.37 c 28.77 56.47 28.77 130.39 28.77 278.24 L 1024 601.62 c 0 147.85 0 221.77 -28.77 278.24 a 263.99 263.99 0 0 1 -115.37 115.37 c -56.47 28.77 -130.39 28.77 -278.24 28.77 L 422.38 1024 c -147.85 0 -221.77 0 -278.24 -28.77 a 263.99 263.99 0 0 1 -115.37 -115.37 c -28.77 -56.47 -28.77 -130.39 -28.77 -278.24 L 0 422.38 c 0 -147.85 0 -221.77 28.77 -278.24 a 263.99 263.99 0 0 1 115.37 -115.37 c 56.47 -28.77 130.39 -28.77 278.24 -28.77 Z" fill="url(#tile)"/>
+  <g id="glyph" transform="translate(2,-21)">
+    <path d="M 364 360 L 364 198 A 28 28 0 0 1 392 170 A 28 28 0 0 1 420 198 L 420 360 Z" fill="#FFFFFF" fill-opacity="0.65"/>
+    <path d="M 604 500 L 604 198 A 28 28 0 0 1 632 170 A 28 28 0 0 1 660 198 L 660 500 Z" fill="#FFFFFF" fill-opacity="0.65"/>
+    <path d="M 340 610 L 340 360 L 444 360 L 444 610 A 68 68 0 0 0 580 610 L 580 500 L 684 500 L 684 610 A 172 172 0 0 1 552 777.28 L 552 832 A 40 40 0 0 1 472 832 L 472 777.28 A 172 172 0 0 1 340 610 Z" fill="#FFFFFF"/>
+    <circle cx="392" cy="360" r="96" fill="#FFFFFF" stroke="url(#ring)" stroke-width="32"/>
+    <circle cx="632" cy="500" r="96" fill="#FFFFFF" stroke="url(#ring)" stroke-width="32"/>
+  </g>
+</svg>

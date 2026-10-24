@@ -1,17 +1,13 @@
 // Значок в трее: свой поток с невидимым окном сообщений. Щелчок — открыть или закрыть окно микшера
 // (оно живёт в этом же процессе, `flyout::Shared`), правая кнопка — меню, колесо над значком — громкость
-// устройства по умолчанию (хук мыши), вид значка — уровень громкости глифом системного шрифта.
+// устройства по умолчанию (хук мыши), вид значка — знак программы или колонка по громкости с движением
+// (`mark` — ход, `mark_render` — кадр).
 
 use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS, CreateBitmap, CreateCompatibleDC,
-    CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP, DT_SINGLELINE,
-    DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FW_NORMAL, GetTextFaceW, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
@@ -23,19 +19,24 @@ use windows::Win32::UI::Shell::{
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, HHOOK, HICON, HMENU, ICONINFO, KillTimer,
-    MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSLLHOOKSTRUCT,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer,
-    SetWindowsHookExW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
+    AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DestroyWindow, DispatchMessageW, GetMessageW, HHOOK, HMENU, KillTimer, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer, SetWindowsHookExW,
+    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+    WH_MOUSE_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
+use anvil_ui::motion::machine::{Presenter, Scene, Show};
+
 use crate::audio::{Control, Flow, Roles, Snapshot, Target, model};
+use crate::config::{IconColor, TrayIcon};
 use crate::flyout::Shared;
 use crate::hotkeys::{Action, AppAction, Combo, next_output};
+use crate::mark::{self, MarkFrame, MarkScene, SpeakerFrame, SpeakerScene};
+use crate::mark_render;
 use crate::placement::Rect;
 use crate::profiles::{self, Cmd};
 use crate::sys;
@@ -50,6 +51,8 @@ const WM_TIMER: u32 = 0x0113;
 const SAVE_TIMER: usize = 1;
 /// Раз в минуту — не пора ли проверить обновления.
 const UPDATE_TIMER: usize = 2;
+/// Кадры значка — только пока знак движется.
+const MARK_TIMER: usize = 3;
 const WM_HOTKEY: u32 = 0x0312;
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_CONSOLE_CONNECT: usize = 0x1;
@@ -90,40 +93,6 @@ struct Ctx {
 }
 
 static CTX: OnceLock<Ctx> = OnceLock::new();
-
-/// Вид значка по громкости устройства по умолчанию.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    Mute,
-    Zero,
-    Low,
-    Mid,
-    High,
-}
-
-impl Level {
-    pub fn of(volume: f32, muted: bool) -> Level {
-        let p = model::percent(volume);
-        match () {
-            _ if muted => Level::Mute,
-            _ if p == 0 => Level::Zero,
-            _ if p <= 33 => Level::Low,
-            _ if p <= 66 => Level::Mid,
-            _ => Level::High,
-        }
-    }
-
-    /// Глиф в Segoe Fluent Icons и Segoe MDL2 Assets (коды одинаковые).
-    fn glyph(self) -> u16 {
-        match self {
-            Level::Mute => 0xE74F,
-            Level::Zero => 0xE992,
-            Level::Low => 0xE993,
-            Level::Mid => 0xE994,
-            Level::High => 0xE995,
-        }
-    }
-}
 
 /// Шаг громкости по повороту колеса (`delta` в единицах Windows, 120 на щелчок).
 pub fn wheel_step(delta: i16) -> f32 {
@@ -399,6 +368,7 @@ fn run(control: Control, shared: Arc<Shared>) {
         TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         let _ = SetTimer(Some(hwnd), UPDATE_TIMER, 60_000, None);
         add_icon(hwnd);
+        start_look(hwnd);
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!("trace: tray icon rect {:?}", icon_rect(hwnd));
         }
@@ -442,30 +412,32 @@ fn base_data(hwnd: HWND) -> NOTIFYICONDATAW {
 
 unsafe fn add_icon(hwnd: HWND) {
     let mut d = base_data(hwnd);
-    d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    d.uFlags = NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     d.uCallbackMessage = WM_TRAY;
-    let (icon, tip) = current_look();
-    d.hIcon = icon;
+    let tip = {
+        let mut guard = LOOK.lock().unwrap();
+        let look = guard.get_or_insert_with(Look::new);
+        // Значок ставится заново (запуск, перезапуск проводника) — кадр нужен в любом случае.
+        look.show.invalidate();
+        feed(look)
+    };
     put_tip(&mut d, &tip);
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &d);
         d.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &d);
-        let _ = DestroyIcon(icon);
+        show_look(hwnd, None);
     }
     update_rect(hwnd);
 }
 
+/// Громкость сменилась (или тема панели задач, или вид значка в настройках): новая цель сцен и подсказка.
 unsafe fn update_look(hwnd: HWND) {
-    let mut d = base_data(hwnd);
-    d.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    let (icon, tip) = current_look();
-    d.hIcon = icon;
-    put_tip(&mut d, &tip);
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &d);
-        let _ = DestroyIcon(icon);
-    }
+    let tip = {
+        let mut guard = LOOK.lock().unwrap();
+        feed(guard.get_or_insert_with(Look::new))
+    };
+    unsafe { show_look(hwnd, Some(&tip)) };
 }
 
 fn put_tip(d: &mut NOTIFYICONDATAW, tip: &str) {
@@ -474,122 +446,182 @@ fn put_tip(d: &mut NOTIFYICONDATAW, tip: &str) {
     d.szTip[w.len()] = 0;
 }
 
-/// Значок и подсказка по устройству вывода по умолчанию.
-fn current_look() -> (HICON, String) {
+/// Обе сцены значка (смена вида в настройках — сразу верный кадр).
+struct Scenes {
+    mark: MarkScene,
+    speaker: SpeakerScene,
+}
+
+/// Значок в трее: сцены, показ не чаще 10 кадров в секунду, устройство по умолчанию (смена — звон).
+struct Look {
+    clock: Instant,
+    scenes: Scenes,
+    show: Presenter<LookKey>,
+    device: Option<String>,
+}
+
+type LookKey = (TrayIcon, IconColor, bool, i32, [i32; 4], [i32; 3]);
+
+static LOOK: Mutex<Option<Look>> = Mutex::new(None);
+
+impl Look {
+    fn new() -> Look {
+        Look {
+            clock: Instant::now(),
+            scenes: Scenes {
+                mark: MarkScene::new([0.0, 0.0], mark::STRIKE_HZ_TRAY, false),
+                speaker: SpeakerScene::new(0.0),
+            },
+            show: Presenter::new(mark::TRAY_FPS),
+            device: None,
+        }
+    }
+
+    fn now(&self) -> f64 {
+        self.clock.elapsed().as_secs_f64()
+    }
+}
+
+/// Кадр значка в трее.
+enum LookFrame {
+    Mark(MarkFrame),
+    Speaker(SpeakerFrame),
+}
+
+/// Что показать: выбранный вид, цвет, тема панели задач и размер значка.
+struct View<'a> {
+    scenes: &'a Scenes,
+    icon: TrayIcon,
+    color: IconColor,
+    dark: bool,
+    size: i32,
+}
+
+impl Scene for View<'_> {
+    type Frame = LookFrame;
+    type Key = LookKey;
+
+    fn frame(&self, now: f64, still: bool) -> LookFrame {
+        match self.icon {
+            TrayIcon::Mark => LookFrame::Mark(self.scenes.mark.frame(now, still)),
+            TrayIcon::Speaker => LookFrame::Speaker(self.scenes.speaker.frame(now, still)),
+        }
+    }
+
+    fn wants_frames(&self, now: f64, still: bool) -> bool {
+        match self.icon {
+            TrayIcon::Mark => self.scenes.mark.wants_frames(now, still),
+            TrayIcon::Speaker => self.scenes.speaker.wants_frames(now, still),
+        }
+    }
+
+    fn at_rest(&self, _now: f64, _still: bool) -> bool {
+        // Покоя «как файл» в трее нет: значок всегда показывает громкость.
+        false
+    }
+
+    fn key(&self) -> LookKey {
+        (self.icon, self.color, self.dark, self.size, self.scenes.mark.key(), self.scenes.speaker.key())
+    }
+}
+
+/// «Меньше движения» — флаг Windows «Показывать анимацию».
+fn still() -> bool {
+    !anvil_ui::motion::animations_enabled()
+}
+
+/// Передать сценам устройство вывода по умолчанию; вернуть подсказку значка.
+fn feed(look: &mut Look) -> String {
     let ctx = CTX.get().expect("tray context");
+    let log = ctx.shared.settings.lock().unwrap().log_scale;
     let default = ctx
         .control
         .snapshot()
         .ok()
         .and_then(|s| s.devices.into_iter().find(|d| d.flow == Flow::Render && d.is_default));
-    let (level, tip) = match &default {
-        Some(d) => (Level::of(d.volume, d.muted), format!("Kamerton: {} — {} %", d.name, model::percent(d.volume))),
-        None => (Level::Mute, format!("Kamerton: {}", T::NoDevices.get())),
-    };
-    (make_icon(level, sys::taskbar_light()), tip)
-}
-
-/// Нарисовать глиф GDI белым на чёрном, яркость — в прозрачность, цвет — по теме панели задач.
-fn make_icon(level: Level, light_taskbar: bool) -> HICON {
-    unsafe {
-        let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()).max(16);
-        let dc = CreateCompatibleDC(None);
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size,
-                biHeight: -size,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let Ok(dib) = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
-            let _ = DeleteDC(dc);
-            return HICON::default();
-        };
-        let old_bmp = SelectObject(dc, HGDIOBJ(dib.0));
-        let font = icon_font(dc, size);
-        let old_font = SelectObject(dc, HGDIOBJ(font.0));
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, COLORREF(0x00FF_FFFF));
-        let mut glyph = [level.glyph()];
-        let mut r = RECT { left: 0, top: 0, right: size, bottom: size };
-        DrawTextW(dc, &mut glyph, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-        let px = std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
-        let c: u32 = if light_taskbar { 0 } else { 255 };
-        for p in px.as_chunks_mut::<4>().0 {
-            let a = p[0].max(p[1]).max(p[2]) as u32;
-            let v = (c * a / 255) as u8;
-            p[0] = v;
-            p[1] = v;
-            p[2] = v;
-            p[3] = a as u8;
-        }
-        SelectObject(dc, old_font);
-        SelectObject(dc, old_bmp);
-        let _ = DeleteObject(HGDIOBJ(font.0));
-        let mask = CreateBitmap(size, size, 1, 1, None);
-        let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: dib };
-        let icon = CreateIconIndirect(&info).unwrap_or_default();
-        let _ = DeleteObject(HGDIOBJ(mask.0));
-        let _ = DeleteObject(HGDIOBJ(dib.0));
-        let _ = DeleteDC(dc);
-        icon
-    }
-}
-
-/// Шрифт значков: Segoe Fluent Icons (Windows 11), иначе Segoe MDL2 Assets (Windows 10).
-unsafe fn icon_font(dc: windows::Win32::Graphics::Gdi::HDC, size: i32) -> windows::Win32::Graphics::Gdi::HFONT {
-    for face in [w!("Segoe Fluent Icons"), w!("Segoe MDL2 Assets")] {
-        unsafe {
-            let font = CreateFontW(
-                -size,
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                ANTIALIASED_QUALITY,
-                DEFAULT_PITCH.0 as u32,
-                face,
-            );
-            let old = SelectObject(dc, HGDIOBJ(font.0));
-            let mut name = [0u16; 64];
-            let n = GetTextFaceW(dc, Some(&mut name)) as usize;
-            SelectObject(dc, old);
-            let got = String::from_utf16_lossy(&name[..n.saturating_sub(1).min(name.len())]);
-            if got.trim_end_matches('\0') == face.to_string().unwrap_or_default() {
-                return font;
+    let (now, still) = (look.now(), still());
+    let s = &mut look.scenes;
+    match &default {
+        Some(d) => {
+            // Ручки — громкость каналов по шкале ползунков; колонка — общая громкость.
+            let (l, r) = model::channels_for(d.balance.unwrap_or(0.0), d.volume);
+            s.mark.fail(now, false, still);
+            s.mark.volume(now, model::to_pos(l, log), model::to_pos(r, log), still);
+            s.mark.mute(now, d.muted, still);
+            s.speaker.fail(now, false, still);
+            s.speaker.volume(now, d.volume, still);
+            s.speaker.mute(now, d.muted, still);
+            if look.device.as_ref().is_some_and(|prev| prev != &d.id) {
+                s.mark.strike(now);
+                s.speaker.strike(now);
             }
-            let _ = DeleteObject(HGDIOBJ(font.0));
+            look.device = Some(d.id.clone());
+            format!("Kamerton: {} — {} %", d.name, model::percent(d.volume))
+        }
+        None => {
+            s.mark.fail(now, true, still);
+            s.speaker.fail(now, true, still);
+            look.device = None;
+            format!("Kamerton: {}", T::NoDevices.get())
         }
     }
+}
+
+/// Запуск: ручки пробегают (знак) или волны загораются по одной (колонка).
+fn start_look(hwnd: HWND) {
+    if let Some(look) = LOOK.lock().unwrap().as_mut() {
+        let now = look.now();
+        look.scenes.mark.sweep(now);
+        look.scenes.speaker.sweep(now);
+    }
+    unsafe { show_look(hwnd, None) };
+}
+
+/// Шаг показа: новый кадр значка, если пора, и подсказка, если дана; таймер кадров — пока знак движется.
+unsafe fn show_look(hwnd: HWND, tip: Option<&str>) {
+    let ctx = CTX.get().expect("tray context");
+    let (icon, color) = {
+        let st = ctx.shared.settings.lock().unwrap();
+        (st.tray_icon, st.tray_color)
+    };
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }.max(16);
+    let dark = !sys::taskbar_light();
+    let (shown, next) = {
+        let mut guard = LOOK.lock().unwrap();
+        let look = guard.get_or_insert_with(Look::new);
+        let (now, still) = (look.now(), still());
+        let view = View { scenes: &look.scenes, icon, color, dark, size };
+        (look.show.step(&view, now, still), look.show.next_in(&view, now, still))
+    };
+    let mut d = base_data(hwnd);
+    d.uFlags = NIF_SHOWTIP;
+    if let Show::Frame(f) = shown {
+        let rgba = match f {
+            LookFrame::Mark(f) => mark_render::mark(&f, size as u32, color),
+            LookFrame::Speaker(f) => mark_render::speaker(&f, size as u32, dark, color),
+        };
+        d.hIcon = sys::icon_from_rgba(&rgba, size);
+        d.uFlags |= NIF_ICON;
+    }
+    if let Some(tip) = tip {
+        put_tip(&mut d, tip);
+        d.uFlags |= NIF_TIP;
+    }
     unsafe {
-        CreateFontW(
-            -size,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
-            DEFAULT_PITCH.0 as u32,
-            w!("Segoe MDL2 Assets"),
-        )
+        if d.uFlags != NIF_SHOWTIP {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &d);
+        }
+        if !d.hIcon.is_invalid() {
+            let _ = DestroyIcon(d.hIcon);
+        }
+        match next {
+            Some(secs) => {
+                let _ = SetTimer(Some(hwnd), MARK_TIMER, ((secs * 1000.0).ceil() as u32).max(10), None);
+            }
+            None => {
+                let _ = KillTimer(Some(hwnd), MARK_TIMER);
+            }
+        }
     }
 }
 
@@ -786,6 +818,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 react_to_changes(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == MARK_TIMER => {
+                let _ = KillTimer(Some(hwnd), MARK_TIMER);
+                show_look(hwnd, None);
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == UPDATE_TIMER => {
                 let settings = ctx.shared.settings.lock().unwrap().clone();
                 crate::update::tick(&settings);
@@ -801,7 +838,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_SETTINGCHANGE => {
-                // Сменилась тема панели задач — перекрасить значок.
+                // Сменилась тема панели задач — перекрасить колонку.
                 update_look(hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -833,17 +870,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn level_follows_volume() {
-        assert_eq!(Level::of(0.8, true), Level::Mute);
-        assert_eq!(Level::of(0.0, false), Level::Zero);
-        assert_eq!(Level::of(0.004, false), Level::Zero);
-        assert_eq!(Level::of(0.33, false), Level::Low);
-        assert_eq!(Level::of(0.34, false), Level::Mid);
-        assert_eq!(Level::of(0.66, false), Level::Mid);
-        assert_eq!(Level::of(0.67, false), Level::High);
-    }
 
     #[test]
     fn app_hotkeys_find_every_output_session() {

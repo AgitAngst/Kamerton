@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::hotkeys::{Action, AppAction, Combo};
+pub use crate::mark_render::IconColor;
 use crate::profiles::{AppState, Memory, Profile};
 
 /// Тема окна.
@@ -26,6 +27,16 @@ pub enum LangPref {
     En,
 }
 
+/// Вид значка в трее.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrayIcon {
+    /// Знак-камертон: ручки — громкость каналов.
+    #[default]
+    Mark,
+    /// Классическая колонка с волнами.
+    Speaker,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// `theme=system|light|dark`.
@@ -38,6 +49,10 @@ pub struct Settings {
     pub wheel_outside: bool,
     /// Логарифмическая (квадратичная) шкала ползунков: `log_scale=1`.
     pub log_scale: bool,
+    /// Вид значка в трее: `tray_icon=mark|speaker`.
+    pub tray_icon: TrayIcon,
+    /// Цвет значка в трее: `tray_color=purple|azure`.
+    pub tray_color: IconColor,
     /// Скрытые программы: строки `hide_app=<путь exe>`.
     pub hidden_apps: BTreeSet<String>,
     /// Скрытые устройства: строки `hide_device=<id>`.
@@ -78,6 +93,8 @@ impl Default for Settings {
             animate: true,
             wheel_outside: false,
             log_scale: false,
+            tray_icon: TrayIcon::Mark,
+            tray_color: IconColor::Purple,
             hidden_apps: BTreeSet::new(),
             hidden_devices: BTreeSet::new(),
             mixer_rect: None,
@@ -161,6 +178,10 @@ impl Settings {
                 s.wheel_outside = on;
             } else if k == "log_scale" {
                 s.log_scale = on;
+            } else if k == "tray_icon" {
+                s.tray_icon = if v == "speaker" { TrayIcon::Speaker } else { TrayIcon::Mark };
+            } else if k == "tray_color" {
+                s.tray_color = if v == "azure" { IconColor::Azure } else { IconColor::Purple };
             } else if k == "hide_app" && !v.is_empty() {
                 s.hidden_apps.insert(v.to_lowercase());
             } else if k == "hide_device" && !v.is_empty() {
@@ -258,6 +279,15 @@ impl Settings {
             b(self.wheel_outside),
             b(self.log_scale)
         ));
+        let icon = match self.tray_icon {
+            TrayIcon::Mark => "mark",
+            TrayIcon::Speaker => "speaker",
+        };
+        let color = match self.tray_color {
+            IconColor::Purple => "purple",
+            IconColor::Azure => "azure",
+        };
+        out.push_str(&format!("tray_icon={icon}\ntray_color={color}\n"));
         for exe in &self.hidden_apps {
             out.push_str(&format!("hide_app={exe}\n"));
         }
@@ -359,7 +389,7 @@ mod tests {
         assert!(s.expanded);
         assert_eq!(
             s.format(),
-            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
+            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\ntray_icon=mark\ntray_color=purple\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
         );
         assert_eq!(Settings::parse(&s.format()), s);
     }
@@ -446,6 +476,15 @@ mod tests {
         assert!(s.hidden_devices.contains("{0.0.0.00000000}.{demo}"));
         assert_eq!(s.mixer_rect, Some([10, 20, 900, 500]));
         assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn tray_icon_round_trip() {
+        let s = Settings::parse("tray_icon=speaker\ntray_color=azure\n");
+        assert_eq!((s.tray_icon, s.tray_color), (TrayIcon::Speaker, IconColor::Azure));
+        assert_eq!(Settings::parse(&s.format()), s);
+        let s = Settings::parse("tray_icon=glyph\ntray_color=green\n");
+        assert_eq!((s.tray_icon, s.tray_color), (TrayIcon::Mark, IconColor::Purple));
     }
 
     #[test]

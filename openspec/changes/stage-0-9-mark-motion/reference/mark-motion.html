@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kamerton — движение знака</title>
+<!--
+  Эталон движения значков Kamerton (изменение stage-0-9-mark-motion). Те же числа и тот же ход, что пойдут в Rust:
+  классы MarkScene и SpeakerScene — чистые машины состояний (их и переносить), mark() и speaker() — геометрия кадра.
+  Параметры: ?scenario=volume|mute|error|strike|sweep|about &icon=mark|speaker (вид значка в трее)
+  &color=purple|azure (цвет значка в трее) &at=<секунда сценария> &still=1 (без хода времени)
+  &px=1 (настоящие пиксели, увеличение ×4) &lang=ru|en &theme=light|dark &slow=1 &reduced=1
+  Снимок: msedge --headless=new --screenshot=out.png --window-size=1100,760 --virtual-time-budget=3000 "<url>"
+-->
+<style>
+:root{--bg:#F3F3F4;--card:#FFFFFF;--text:#17171A;--weak:#55555D;--border:#E2E2E5;--raised:#F0F0F2;--accent:#A33091}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0F0F11;--card:#1C1C1F;--text:#ECECEE;--weak:#A0A0A8;--border:#2C2C31;--raised:#252529;--accent:#D57BC3}}
+:root[data-theme=dark]{--bg:#0F0F11;--card:#1C1C1F;--text:#ECECEE;--weak:#A0A0A8;--border:#2C2C31;--raised:#252529;--accent:#D57BC3}
+body{margin:0;padding:20px;background:var(--bg);color:var(--text);font:14px "Segoe UI",system-ui,sans-serif}
+h1{font-size:20px;font-weight:600;margin:0 0 12px}
+.bar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.sep{width:12px}
+button{font:inherit;font-size:13px;padding:5px 12px;border-radius:6px;border:1px solid var(--border);background:var(--raised);color:var(--text);cursor:pointer}
+button.on{border-color:var(--accent);color:var(--accent)}
+.row{display:flex;flex-wrap:wrap;gap:14px;align-items:stretch}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+.cap{font-size:12px;color:var(--weak);margin-top:6px}
+.tb{display:flex;flex-wrap:wrap;align-items:center;gap:14px;border-radius:8px;padding:10px 14px;margin-top:8px}
+.tb.dark{background:#202020}.tb.light{background:#F3F3F3;border:1px solid #DADADA}
+canvas{image-rendering:pixelated}
+#read{font:12px Consolas,monospace;color:var(--weak);margin-top:12px;white-space:pre}
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<div class="bar" id="bar"></div>
+<div class="row">
+  <div class="card"><div id="big"></div><div class="cap" id="capBig"></div></div>
+  <div class="card" style="min-width:250px">
+    <div id="capAbout" style="font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--weak)"></div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:10px"><div id="about56"></div><div><div style="font-size:13.5px">Kamerton 0.9.0</div><div class="cap" id="capAbout2"></div></div></div>
+    <div style="margin-top:12px" id="about112"></div>
+  </div>
+  <div class="card" style="flex:1;min-width:300px">
+    <div id="capTray" style="font-weight:600"></div>
+    <div class="tb dark" id="trayDark"></div>
+    <div class="tb light" id="trayLight"></div>
+    <div class="cap" id="capTray2"></div>
+  </div>
+</div>
+<div id="read"></div>
+<script>
+'use strict';
+// ---------- Числа (те же в Rust) ----------
+const K = {
+  SLIDE: 0.20,          // LAYOUT: ручки едут к новой громкости, ease_out
+  FADE: 0.18,           // STATE: «без звука» — знак бледнеет, ease_out
+  MUTED_ALPHA: 0.55,    // непрозрачность знака без звука
+  STRIKE: 0.60,         // WAVE: звон при смене устройства
+  STRIKE_DEG: 5,        // размах наклона зубцов, градусы
+  STRIKE_TAU: 0.18,     // затухание, с
+  STRIKE_HZ: 7,         // частота там, где кадров хватает (крупный знак эталона)
+  STRIKE_HZ_TRAY: 2.5,  // частота в трее: 10 кадров в секунду не покажут 7 Гц
+  SWEEP_DOWN: 0.18,     // фейдеры: вниз, ease_in
+  SWEEP_UP: 0.30,       // вверх до упора, ease_standard
+  SWEEP_BACK: 0.30,     // на место, ease_out
+  SWEEP_STAGGER: 0.12,  // правая ручка позже левой
+  TRAY_FPS: 10,         // потолок кадров трея (Presenter)
+  DANGER: '#F2676B',    // ручки знака при ошибке; знак от темы не зависит
+  // Колонка
+  WAVE_IN: 0.20,        // LAYOUT: волна появляется или гаснет, ease_out
+  CROSS: 0.18,          // STATE: крестик «без звука» прорисовывается, ease_out
+  THUMP: 0.30,          // толчок диффузора
+  THUMP_SCALE: 0.14,    // насколько диффузор вырастает в толчке
+  RIPPLE: 0.60,         // WAVE: волна уходит наружу
+  START_DELAY: 0.15,    // запуск: первая волна после толчка
+  START_STEP: 0.15,     // запуск: шаг между волнами
+};
+const SWEEP = K.SWEEP_DOWN + K.SWEEP_UP + K.SWEEP_BACK;
+
+// ---------- Цвета ----------
+// Плитка знака по цвету значка в трее; на exe, окне и в «О программе» — всегда пурпур.
+const TILE_COLORS = {purple: ['#C24FAE', '#931A82'], azure: ['#0792B3', '#03647B']};
+// Колонка: цвет акцентного текста под тёмную и светлую панель задач (контраст ≥ 4,5:1).
+const SPEAKER_COLORS = {purple: {dark: '#DE93CD', light: '#962A85'}, azure: {dark: '#49C0E5', light: '#036A83'}};
+const SPEAKER_ERROR = {dark: '#F2676B', light: '#C4303A'};
+
+// ---------- Геометрия знака (единицы плитки 1024) ----------
+const TILE = 'M 601.62 0 c 147.85 0 221.77 0 278.24 28.77 a 263.99 263.99 0 0 1 115.37 115.37 c 28.77 56.47 28.77 130.39 28.77 278.24 L 1024 601.62 c 0 147.85 0 221.77 -28.77 278.24 a 263.99 263.99 0 0 1 -115.37 115.37 c -56.47 28.77 -130.39 28.77 -278.24 28.77 L 422.38 1024 c -147.85 0 -221.77 0 -278.24 -28.77 a 263.99 263.99 0 0 1 -115.37 -115.37 c -28.77 -56.47 -28.77 -130.39 -28.77 -278.24 L 0 422.38 c 0 -147.85 0 -221.77 28.77 -278.24 a 263.99 263.99 0 0 1 115.37 -115.37 c 56.47 -28.77 130.39 -28.77 278.24 -28.77 Z';
+// full — от 49 px («О программе», значок окна); small — до 48 px (трей). rest — ручки как в файле знака.
+const G = {
+  full:  {w: 104, track: 56, gap: 136, top: 170, C: 610, stem: 80, end: 872, r: 96,  ring: 32, pale: 0.65, dx: 2, dy: -21, rest: [360, 500]},
+  small: {w: 112, track: 80, gap: 136, top: 180, C: 606, stem: 88, end: 862, r: 104, ring: 0,  pale: 0.70, dx: 1, dy: -14, rest: [370, 505]},
+};
+// Доля 0..1 (громкость по шкале ползунка программы) → y ручки: 0 — низ дорожки, 1 — верх.
+const lo = g => g.C - 40, hi = g => g.top + 34;
+const knobY = (g, v) => lo(g) + (hi(g) - lo(g)) * v;
+const restV = g => g.rest.map(y => (lo(g) - y) / (lo(g) - hi(g)));
+
+// ---------- Геометрия колонки (единицы 32 × 32) ----------
+const SPK = {
+  body: 'M 3.5 12 H 9 L 15.5 6.5 V 25.5 L 9 20 H 3.5 Z',   // корпус и диффузор, обводка 1,2 со скруглением
+  bodyStroke: 1.2,
+  pivot: [9, 16],              // вокруг этой точки диффузор растёт в толчке
+  center: [15.5, 16],          // центр волн
+  radii: [5, 9.5, 14],         // волны 1–3
+  span: 50,                    // полуугол волны, градусы
+  stroke: 2.3,                 // толщина волн и крестика, круглые концы
+  cross: 'M 21 12 L 29 20 M 29 12 L 21 20', crossLen: 11.32,
+  ripple: [5, 16],             // радиус уходящей волны: от и до
+};
+// Число волн по громкости — как у прежнего глифа (Level::of): 0 — нет, ≤ 33 % — 1, ≤ 66 % — 2, иначе 3.
+const waves = (vol, muted) => { const p = Math.round(vol * 100); return muted || p <= 0 ? 0 : p <= 33 ? 1 : p <= 66 ? 2 : 3; };
+
+// ---------- Кривые набора ----------
+function bezier(x1, y1, x2, y2) {
+  return t => {
+    if (t <= 0) return 0; if (t >= 1) return 1;
+    let u = t;
+    for (let i = 0; i < 12; i++) {
+      const x = 3 * (1 - u) ** 2 * u * x1 + 3 * (1 - u) * u * u * x2 + u ** 3 - t;
+      const d = 3 * (1 - u) ** 2 * x1 + 6 * (1 - u) * u * (x2 - x1) + 3 * u * u * (1 - x2);
+      if (Math.abs(x) < 1e-7 || Math.abs(d) < 1e-7) break;
+      u = Math.min(1, Math.max(0, u - x / d));
+    }
+    return 3 * (1 - u) ** 2 * u * y1 + 3 * (1 - u) * u * u * y2 + u ** 3;
+  };
+}
+const OUT = bezier(0.16, 1, 0.3, 1), IN = bezier(0.7, 0, 0.84, 0), STD = bezier(0.4, 0, 0.2, 1);
+const tween = (w, t, d, e) => t >= w.t0 + d ? w.b : w.a + (w.b - w.a) * e(Math.max(0, (t - w.t0) / d));
+const clamp01 = x => Math.min(1, Math.max(0, x));
+
+// ---------- Машина состояний знака (переносится в src/mark.rs) ----------
+// Чистая: события с отметкой времени → кадр в момент t. В покое кадров не просит.
+class MarkScene {
+  constructor(home) {           // home — [л, п] ручек, когда звук неизвестен (до первого события)
+    this.knob = home.map(v => ({a: v, b: v, t0: -1e9}));
+    this.vol = home.slice(); this.muted = false; this.error = false;
+    this.fade = {a: 1, b: 1, t0: -1e9}; this.strikeAt = -1e9; this.sweepAt = -1e9;
+  }
+  knobsAt(t) { return this.knob.map(k => tween(k, t, K.SLIDE, OUT)); }
+  aim(t, still) {
+    if (this.error) return;
+    const now = this.knobsAt(t), to = this.muted ? [0, 0] : this.vol;
+    this.knob = to.map((b, i) => ({a: still ? b : now[i], b, t0: t}));
+  }
+  volume(t, l, r, still) { this.vol = [l, r]; this.aim(t, still); }
+  mute(t, on, still) {
+    if (on === this.muted) return;
+    const f = tween(this.fade, t, K.FADE, OUT);
+    this.muted = on; this.fade = {a: still ? (on ? K.MUTED_ALPHA : 1) : f, b: on ? K.MUTED_ALPHA : 1, t0: t};
+    this.aim(t, still);
+  }
+  fail(t, on, still) {         // нет устройства вывода или служба звука пропала
+    if (on === this.error) return;
+    if (on) { const v = this.knobsAt(t); this.knob = v.map(x => ({a: x, b: x, t0: t})); this.error = true; }
+    else { this.error = false; this.aim(t, still); }
+  }
+  strike(t) { if (!this.error) this.strikeAt = t; }   // смена основного устройства вывода
+  sweep(t) { if (!this.error) this.sweepAt = t; }     // запуск (трей), открытие «О программе»
+  frame(t, hz, still) {
+    let v = this.knobsAt(t);
+    let ang = 0;
+    if (!this.error && !still) {
+      v = v.map((x, i) => {
+        const u = t - this.sweepAt - i * K.SWEEP_STAGGER;
+        if (u < 0 || u >= SWEEP) return x;
+        if (u < K.SWEEP_DOWN) return x * (1 - IN(u / K.SWEEP_DOWN));
+        if (u < K.SWEEP_DOWN + K.SWEEP_UP) return STD((u - K.SWEEP_DOWN) / K.SWEEP_UP);
+        return 1 + (x - 1) * OUT((u - K.SWEEP_DOWN - K.SWEEP_UP) / K.SWEEP_BACK);
+      });
+      const s = t - this.strikeAt;
+      if (s >= 0 && s < K.STRIKE) ang = K.STRIKE_DEG * Math.exp(-s / K.STRIKE_TAU) * Math.sin(2 * Math.PI * hz * s);
+    }
+    return {l: v[0], r: v[1], ang, alpha: tween(this.fade, t, K.FADE, OUT), error: this.error};
+  }
+  wantsFrames(t, still) {
+    if (still || this.error) return false;
+    const moving = k => t < k.t0 + K.SLIDE && k.a !== k.b;
+    return this.knob.some(moving) || (t < this.fade.t0 + K.FADE && this.fade.a !== this.fade.b)
+      || t - this.strikeAt < K.STRIKE || t - this.sweepAt < SWEEP + K.SWEEP_STAGGER;
+  }
+}
+
+// ---------- Машина состояний колонки (переносится в src/mark.rs рядом) ----------
+// Громкость — общая громкость устройства (как у прежнего глифа), волны — по порогам.
+class SpeakerScene {
+  constructor(vol) {
+    this.vol = vol; this.muted = false; this.error = false;
+    const n = waves(vol, false);
+    this.wave = [0, 1, 2].map(i => ({a: +(i < n), b: +(i < n), t0: -1e9}));
+    this.cross = {a: 0, b: 0, t0: -1e9}; this.thumpAt = -1e9; this.startAt = -1e9;
+  }
+  aim(t, still) {
+    const n = this.error ? 0 : waves(this.vol, this.muted);
+    this.wave = this.wave.map((w, i) => {
+      const b = +(i < n);
+      return w.b === b ? w : {a: still ? b : tween(w, t, K.WAVE_IN, OUT), b, t0: t};
+    });
+    const c = this.muted && !this.error ? 1 : 0;
+    if (this.cross.b !== c) this.cross = {a: still ? c : tween(this.cross, t, K.CROSS, OUT), b: c, t0: t};
+  }
+  volume(t, l, r, still) { this.vol = Math.max(l, r); this.aim(t, still); }
+  mute(t, on, still) { this.muted = on; this.aim(t, still); }
+  fail(t, on, still) { this.error = on; this.aim(t, still); }
+  strike(t) { if (!this.error) this.thumpAt = t; }   // смена устройства: толчок и уходящая волна
+  sweep(t) { if (!this.error) this.startAt = t; }    // запуск: толчок и волны по одной
+  frame(t, still) {
+    let p = this.wave.map(w => tween(w, t, K.WAVE_IN, OUT));
+    let thump = 1, ripple = null;
+    if (!this.error && !still) {
+      const s = t - this.startAt, n = waves(this.vol, this.muted);
+      if (s >= 0 && s < this.startLen()) p = p.map((x, i) => i < n ? OUT(clamp01((s - K.START_DELAY - i * K.START_STEP) / K.WAVE_IN)) : x);
+      const k = Math.min(t - this.thumpAt, s >= 0 ? s : 1e9);
+      if (k >= 0 && k < K.THUMP) thump = 1 + K.THUMP_SCALE * Math.sin(Math.PI * k / K.THUMP);
+      const r = t - this.thumpAt;
+      if (r >= 0 && r < K.RIPPLE) ripple = {r: SPK.ripple[0] + (SPK.ripple[1] - SPK.ripple[0]) * OUT(r / K.RIPPLE), alpha: 0.9 * (1 - r / K.RIPPLE)};
+    }
+    return {waves: p, cross: tween(this.cross, t, K.CROSS, OUT), thump, ripple, error: this.error};
+  }
+  startLen() { return K.START_DELAY + 2 * K.START_STEP + K.WAVE_IN; }
+  wantsFrames(t, still) {
+    if (still || this.error) return false;
+    return this.wave.some(w => t < w.t0 + K.WAVE_IN && w.a !== w.b) || (t < this.cross.t0 + K.CROSS && this.cross.a !== this.cross.b)
+      || t - this.thumpAt < K.RIPPLE || t - this.startAt < this.startLen();
+  }
+}
+
+// ---------- Кадры ----------
+let uid = 0;
+function grad(name, id, y, color) {
+  const [a, b] = TILE_COLORS[color];
+  return `<linearGradient id="${name}${id}" gradientUnits="userSpaceOnUse" x1="0" y1="${y}" x2="0" y2="${1024 + y}">`
+    + `<stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient>`;
+}
+function mark(g, f, size, color = 'purple') {
+  const id = ++uid, off = g.gap / 2 + g.w / 2, Ro = g.gap / 2 + g.w, Ri = g.gap / 2, h = g.stem / 2;
+  const ys = g.C + Math.sqrt(Ro * Ro - h * h);
+  const U = `M ${512 - Ro} ${g.C} L ${512 - Ri} ${g.C} A ${Ri} ${Ri} 0 0 0 ${512 + Ri} ${g.C} L ${512 + Ro} ${g.C} `
+    + `A ${Ro} ${Ro} 0 0 1 ${512 + h} ${ys} L ${512 + h} ${g.end - h} A ${h} ${h} 0 0 1 ${512 - h} ${g.end - h} `
+    + `L ${512 - h} ${ys} A ${Ro} ${Ro} 0 0 1 ${512 - Ro} ${g.C} Z`;
+  const tr = g.track / 2, knob = f.error ? K.DANGER : '#FFFFFF';
+  const prong = (cx, v, sign) => {
+    const y = knobY(g, v);
+    return `<g transform="translate(${cx} ${g.C}) skewX(${sign * f.ang}) translate(${-cx} ${-g.C})">`
+      + `<path d="M ${cx - tr} ${y} L ${cx - tr} ${g.top + tr} A ${tr} ${tr} 0 0 1 ${cx + tr} ${g.top + tr} L ${cx + tr} ${y} Z" fill="#FFFFFF" fill-opacity="${g.pale}"/>`
+      + `<rect x="${cx - g.w / 2}" y="${y}" width="${g.w}" height="${g.C + 2 - y}" fill="#FFFFFF"/>`
+      + `<circle cx="${cx}" cy="${y}" r="${g.r}" fill="${knob}"${g.ring ? ` stroke="url(#ring${id})" stroke-width="${g.ring}"` : ''}/></g>`;
+  };
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="${size}" height="${size}">`
+    + `<defs>${grad('tile', id, 0, color)}${grad('ring', id, -g.dy, color)}</defs><path d="${TILE}" fill="url(#tile${id})"/>`
+    + `<g transform="translate(${g.dx} ${g.dy})" opacity="${f.alpha.toFixed(4)}"><path d="${U}" fill="#FFFFFF"/>`
+    + `${prong(512 - off, f.l, 1)}${prong(512 + off, f.r, -1)}</g></svg>`;
+}
+function arc(r, color, alpha) {
+  const a = SPK.span * Math.PI / 180, [cx, cy] = SPK.center;
+  const p = s => `${(cx + r * Math.cos(s * a)).toFixed(3)} ${(cy + r * Math.sin(s * a)).toFixed(3)}`;
+  return `<path d="M ${p(-1)} A ${r} ${r} 0 0 1 ${p(1)}" fill="none" stroke="${color}" stroke-width="${SPK.stroke}" stroke-linecap="round" opacity="${alpha.toFixed(4)}"/>`;
+}
+function speaker(f, size, dark, color = 'purple') {
+  const c = f.error ? SPEAKER_ERROR[dark ? 'dark' : 'light'] : SPEAKER_COLORS[color][dark ? 'dark' : 'light'];
+  const [px, py] = SPK.pivot;
+  let s = `<g transform="translate(${px} ${py}) scale(${f.thump.toFixed(4)}) translate(${-px} ${-py})">`
+    + `<path d="${SPK.body}" fill="${c}" stroke="${c}" stroke-width="${SPK.bodyStroke}" stroke-linejoin="round"/></g>`;
+  SPK.radii.forEach((r, i) => { const p = f.waves[i]; if (p > 0.001) s += arc(r * (0.82 + 0.18 * p), c, p); });
+  if (f.ripple) s += arc(f.ripple.r, c, f.ripple.alpha);
+  // Каждый штрих крестика растёт от своего начала (21; 12) и (29; 12) на долю cross.
+  if (f.cross > 0.001) for (const d of SPK.cross.split(' M ')) s += `<path d="${d.startsWith('M') ? d : 'M ' + d}" fill="none" stroke="${c}" `
+    + `stroke-width="${SPK.stroke}" stroke-linecap="round" stroke-dasharray="${SPK.crossLen} ${SPK.crossLen}" `
+    + `stroke-dashoffset="${(SPK.crossLen * (1 - f.cross)).toFixed(3)}"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}">${s}</svg>`;
+}
+
+// ---------- Сценарии: события по секундам, период повтора ----------
+// Громкость — доля по шкале ползунка; [л, п] — с учётом баланса (колонка берёт общую громкость).
+const SCENARIOS = {
+  volume: {period: 3.6, ev: [[0.5, 'volume', 0.8, 0.8], [1.5, 'volume', 0.25, 0.25], [2.5, 'volume', 0.6, 0.35]]},
+  mute:   {period: 3.0, ev: [[0.5, 'mute', true], [2.0, 'mute', false]]},
+  error:  {period: 4.0, ev: [[0.5, 'fail', true], [2.5, 'fail', false]]},
+  strike: {period: 2.0, ev: [[0.5, 'strike'], [0.5, 'volume', 0.7, 0.7]]},
+  sweep:  {period: 2.0, ev: [[0.3, 'sweep']]},
+  about:  {period: 2.0, ev: [[0.3, 'sweep']], about: true},
+};
+const START = [0.4, 0.4];      // громкость в начале каждого сценария (трей)
+
+function replay(scene, name, t, still) {
+  for (const [at, op, a, b] of SCENARIOS[name].ev) {
+    if (at > t) break;
+    if (op === 'volume') scene.volume(at, a, b, still);
+    else if (op === 'mute') scene.mute(at, a, still);
+    else if (op === 'fail') scene.fail(at, a, still);
+    else if (op === 'strike') scene.strike(at);
+    else if (op === 'sweep') scene.sweep(at);
+  }
+  return scene;
+}
+
+// ---------- Страница ----------
+const q = new URLSearchParams(location.search);
+const S = {scenario: q.get('scenario') || 'volume', icon: q.get('icon') || 'mark', color: q.get('color') || 'purple',
+  at: q.has('at') ? +q.get('at') : null, still: q.get('still') === '1', px: q.get('px') === '1', lang: q.get('lang') || 'ru',
+  slow: q.get('slow') === '1', reduced: q.get('reduced') === '1'};
+if (q.get('theme')) document.documentElement.dataset.theme = q.get('theme');
+const T = {
+  ru: {title: 'Kamerton — движение значков (эталон)', volume: 'Громкость', mute: 'Без звука', error: 'Ошибка', strike: 'Смена устройства',
+    sweep: 'Запуск', about: '«О программе»', slow: 'Медленно', reduced: 'Меньше движения', px: 'Пиксели ×4',
+    mark: 'Знак', speaker: 'Колонка', purple: 'Пурпур', azure: 'Лазурь',
+    big: 'Полный знак, 150 px', aboutCap: 'О ПРОГРАММЕ', about2: '56 и 112 px, играет при открытии', tray: 'Трей: 16 · 20 · 24 · 32 px',
+    trayMark: 'Знак (малый), не чаще 10 кадров в секунду; ручки — громкость левого и правого канала',
+    traySpeaker: 'Колонка, не чаще 10 кадров в секунду; волны — общая громкость (0 / ≤ 33 / ≤ 66 / > 66 %)'},
+  en: {title: 'Kamerton — icon motion (reference)', volume: 'Volume', mute: 'Muted', error: 'Error', strike: 'Device switch',
+    sweep: 'Startup', about: '“About”', slow: 'Slow', reduced: 'Reduced motion', px: 'Pixels ×4',
+    mark: 'Mark', speaker: 'Speaker', purple: 'Purple', azure: 'Azure',
+    big: 'Full mark, 150 px', aboutCap: 'ABOUT', about2: '56 and 112 px, plays when opened', tray: 'Tray: 16 · 20 · 24 · 32 px',
+    trayMark: 'Small mark, at most 10 frames per second; knobs are left and right channel volume',
+    traySpeaker: 'Speaker, at most 10 frames per second; waves follow the device volume (0 / ≤ 33 / ≤ 66 / > 66 %)'},
+};
+const tx = k => T[S.lang][k] || k;
+function controls() {
+  document.documentElement.lang = S.lang;
+  document.getElementById('title').textContent = tx('title');
+  for (const [id, k] of [['capBig', 'big'], ['capAbout', 'aboutCap'], ['capAbout2', 'about2'], ['capTray', 'tray']])
+    document.getElementById(id).textContent = tx(k);
+  document.getElementById('capTray2').textContent = tx(S.icon === 'speaker' ? 'traySpeaker' : 'trayMark');
+  const bar = document.getElementById('bar'); bar.innerHTML = '';
+  const add = (label, on, fn) => { const b = document.createElement('button'); b.textContent = label; if (on) b.className = 'on'; b.onclick = fn; bar.appendChild(b); };
+  const gap = () => { const s = document.createElement('span'); s.className = 'sep'; bar.appendChild(s); };
+  for (const name of Object.keys(SCENARIOS)) add(tx(name), S.scenario === name, () => { S.scenario = name; restart(); });
+  gap();
+  for (const v of ['mark', 'speaker']) add(tx(v), S.icon === v, () => { S.icon = v; restart(); });
+  for (const v of ['purple', 'azure']) add(tx(v), S.color === v, () => { S.color = v; restart(); });
+  gap();
+  add(tx('slow'), S.slow, () => { S.slow = !S.slow; restart(); });
+  add(tx('reduced'), S.reduced, () => { S.reduced = !S.reduced; restart(); });
+  add(tx('px'), S.px, () => { S.px = !S.px; restart(); });
+  add(S.lang === 'ru' ? 'EN' : 'RU', false, () => { S.lang = S.lang === 'ru' ? 'en' : 'ru'; restart(); });
+}
+function px(el, svg, size) {        // настоящие пиксели: SVG в размер, потом ×4 без сглаживания
+  const img = new Image(), c = document.createElement('canvas');
+  c.width = c.height = size * 4; c.style.width = c.style.height = size * 4 + 'px';
+  img.onload = () => {
+    const o = document.createElement('canvas'); o.width = o.height = size;
+    o.getContext('2d').drawImage(img, 0, 0, size, size);
+    const x = c.getContext('2d'); x.imageSmoothingEnabled = false; x.drawImage(o, 0, 0, size * 4, size * 4);
+  };
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  el.appendChild(c);
+}
+function put(el, svg, size, pixels) { el.innerHTML = ''; if (pixels) px(el, svg, size); else el.innerHTML = svg; }
+
+let t0 = performance.now(), lastTray = -1;
+function restart() { t0 = performance.now(); lastTray = -1; controls(); if (S.at !== null) draw(S.at); }
+function draw(t) {
+  const sc = SCENARIOS[S.scenario], still = S.reduced;
+  // Крупно и в «О программе» — знак (всегда пурпур); дом ручек «О программе» — положения файла, иначе громкость.
+  const big = replay(new MarkScene(sc.about ? restV(G.full) : START), S.scenario, t, still);
+  const fBig = big.frame(t, K.STRIKE_HZ, still);
+  put(document.getElementById('big'), mark(G.full, fBig, 150), 150, false);
+  put(document.getElementById('about56'), mark(G.full, fBig, 56), 56, S.px);
+  put(document.getElementById('about112'), mark(G.full, fBig, 112), 112, false);
+  let read = `t=${t.toFixed(2)}  mark: l=${fBig.l.toFixed(4)} r=${fBig.r.toFixed(4)} ang=${fBig.ang.toFixed(3)}° alpha=${fBig.alpha.toFixed(4)} `
+    + `error=${fBig.error} frames=${big.wantsFrames(t, still)}`;
+  const tick = Math.floor(t * K.TRAY_FPS), tt = tick / K.TRAY_FPS;
+  if (S.icon === 'speaker') {
+    const sp = replay(new SpeakerScene(START[0]), S.scenario, tt, still), f = sp.frame(tt, still);
+    if (tick !== lastTray || S.at !== null)
+      for (const [id, dark] of [['trayDark', true], ['trayLight', false]]) {
+        const el = document.getElementById(id); el.innerHTML = '';
+        for (const z of [16, 20, 24, 32]) { const s = document.createElement('span'); el.appendChild(s); put(s, speaker(f, z, dark, S.color), z, S.px); }
+      }
+    const fs = replay(new SpeakerScene(START[0]), S.scenario, t, still).frame(t, still);
+    read += `\n         speaker: waves=${fs.waves.map(x => x.toFixed(4)).join('/')} cross=${fs.cross.toFixed(4)} thump=${fs.thump.toFixed(4)} `
+      + `ripple=${fs.ripple ? fs.ripple.r.toFixed(3) + '@' + fs.ripple.alpha.toFixed(3) : '-'} error=${fs.error}`;
+  } else if (tick !== lastTray || S.at !== null) {
+    const tray = replay(new MarkScene(sc.about ? restV(G.small) : START), S.scenario, tt, still);
+    const f = tray.frame(tt, K.STRIKE_HZ_TRAY, still);
+    for (const id of ['trayDark', 'trayLight']) {
+      const el = document.getElementById(id); el.innerHTML = '';
+      for (const z of [16, 20, 24, 32]) { const s = document.createElement('span'); el.appendChild(s); put(s, mark(G.small, f, z, S.color), z, S.px); }
+    }
+  }
+  lastTray = tick;
+  document.getElementById('read').textContent = read;
+}
+function loop() {
+  if (S.at === null && !S.still) {
+    const sc = SCENARIOS[S.scenario];
+    draw(((performance.now() - t0) / 1000 / (S.slow ? 4 : 1)) % sc.period);
+  }
+  requestAnimationFrame(loop);
+}
+document.getElementById('about56').onclick = () => { S.scenario = 'about'; restart(); };
+controls();
+if (S.at !== null) draw(S.at); else if (S.still) draw(0); else requestAnimationFrame(loop);
+</script>
+</body>
+</html>

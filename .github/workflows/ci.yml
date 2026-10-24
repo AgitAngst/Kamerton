@@ -1,0 +1,37 @@
+# Проверка Kamerton на GitHub — по кнопке (Actions → CI → Run workflow) после каждой новой версии
+# (правило владельца 24.10.2026, `CLAUDE.md` → «Сборка на GitHub»). Репозиторий открытый — минуты не считаются,
+# но запуск всё равно по кнопке: проверять стоит версию, а не каждый шаг. Программа только под Windows.
+name: CI
+
+on:
+  workflow_dispatch:
+
+# Новый запуск отменяет ещё идущую проверку той же ветки: проверять стоит только последнее.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: windows-latest
+    # Потолок на случай зависшего теста.
+    timeout-minutes: 60
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Версия Rust — та же, что на ПК: с `-D warnings` новый выпуск Rust ломал бы проверку сам по себе.
+      # Поднимать вместе с `rustup update` на ПК.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: clippy, rustfmt
+      # Кеш сборки: повторный прогон в разы короче холодного.
+      - uses: Swatinem/rust-cache@v2
+      # Дешёвое — первым. Без `--all`: только свой код.
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      # `--no-fail-fast`: один прогон показывает все упавшие тесты.
+      - run: cargo test --locked --all-features --no-fail-fast

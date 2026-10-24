@@ -1,6 +1,6 @@
 [package]
 name = "kamerton"
-version = "0.8.9"
+version = "0.9.0"
 edition = "2024"
 description = "Tray volume mixer for Windows"
 license = "MIT"
@@ -52,6 +52,10 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+# Значок exe — ресурс из `assets/icon/kamerton.ico` (разрешено владельцем 24.10.2026).
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

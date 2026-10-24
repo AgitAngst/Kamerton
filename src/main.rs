@@ -11,6 +11,8 @@ mod d3d;
 mod flyout;
 mod hotkeys;
 mod icons;
+mod mark;
+mod mark_render;
 mod placement;
 mod profiles;
 mod shell;

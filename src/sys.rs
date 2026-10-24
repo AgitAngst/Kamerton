@@ -1,11 +1,13 @@
-// Мелкие вызовы Win32 для окна и трея: один экземпляр, консоль, мониторы, показ окна, тема панели задач.
+// Мелкие вызовы Win32 для окна и трея: один экземпляр, консоль, мониторы, показ окна, тема панели задач,
+// значки из кадров RGBA.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, CreateRoundRectRgn, DIB_RGB_COLORS,
+    DeleteObject, GetMonitorInfoW, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     SetWindowRgn,
 };
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
@@ -13,11 +15,12 @@ use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, PostMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE,
+    CreateIconIndirect, HICON, HWND_TOPMOST, ICON_BIG, ICON_SMALL, ICONINFO, PostMessageW, SM_CXICON, SM_CXSMICON,
+    SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WM_CLOSE, WM_SETICON,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -282,4 +285,69 @@ pub fn private_mb() -> f64 {
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Значок Windows из кадра RGBA (прямая альфа, как в файлах `.ico`). Отдать `DestroyIcon`, когда не нужен.
+pub fn icon_from_rgba(rgba: &[u8], size: i32) -> HICON {
+    unsafe {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let Ok(dib) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            return HICON::default();
+        };
+        let px = std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
+        for (d, s) in px.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {
+            *d = [s[2], s[1], s[0], s[3]];
+        }
+        let mask = CreateBitmap(size, size, 1, 1, None);
+        let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: dib };
+        let icon = CreateIconIndirect(&info).unwrap_or_default();
+        let _ = DeleteObject(HGDIOBJ(mask.0));
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        icon
+    }
+}
+
+/// Значок окна (заголовок, панель задач, Alt+Tab) — знак программы в положениях файла, по DPI окна.
+pub fn set_window_icon(raw: isize) {
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd(raw)).max(96);
+        for (which, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+            let size = GetSystemMetricsForDpi(metric, dpi).max(16);
+            let rgba = crate::mark_render::mark(
+                &crate::mark_render::rest(size as u32),
+                size as u32,
+                crate::mark_render::IconColor::Purple,
+            );
+            // Окно живёт до выхода из процесса — значки не освобождаются.
+            let icon = icon_from_rgba(&rgba, size);
+            SendMessageW(hwnd(raw), WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_from_a_frame() {
+        let rgba = crate::mark_render::mark(&crate::mark_render::rest(32), 32, crate::mark_render::IconColor::Purple);
+        let icon = icon_from_rgba(&rgba, 32);
+        assert!(!icon.is_invalid());
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(icon);
+        }
+    }
 }

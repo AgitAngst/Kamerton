@@ -136,11 +136,19 @@ pub enum T {
     DefaultBadge,
     Input,
     BalanceCenter,
+
+    TrayIcon,
+    TrayStyle,
+    TrayMark,
+    TraySpeaker,
+    IconColor,
+    ColorPurple,
+    ColorAzure,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 99] = [
+    pub const ALL: [T; 106] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -240,6 +248,13 @@ impl T {
         T::DefaultBadge,
         T::Input,
         T::BalanceCenter,
+        T::TrayIcon,
+        T::TrayStyle,
+        T::TrayMark,
+        T::TraySpeaker,
+        T::IconColor,
+        T::ColorPurple,
+        T::ColorAzure,
     ];
 
     /// (русский, английский)
@@ -357,6 +372,13 @@ impl T {
             T::DefaultBadge => ("Основное", "Default"),
             T::Input => ("Ввод", "Input"),
             T::BalanceCenter => ("Центр", "Center"),
+            T::TrayIcon => ("Значок в трее", "Tray icon"),
+            T::TrayStyle => ("Вид", "Style"),
+            T::TrayMark => ("Знак", "Mark"),
+            T::TraySpeaker => ("Колонка", "Speaker"),
+            T::IconColor => ("Цвет", "Color"),
+            T::ColorPurple => ("Пурпур", "Purple"),
+            T::ColorAzure => ("Лазурь", "Azure"),
         }
     }
 

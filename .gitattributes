@@ -1,0 +1,2 @@
+# Raw RGBA samples for the frame rasterizer tests: bytes, never line endings.
+*.rgba binary

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anvil_ui::Palette;
+use anvil_ui::motion::machine::Scene;
 use anvil_ui::theme::radius;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Key, MouseWheelUnit, Rect, Sense, Stroke,
@@ -16,9 +17,11 @@ use eframe::egui::{
 };
 
 use crate::audio::{App, AppKey, Audio, Control, Device, Flow, Roles, Snapshot, Target, model};
-use crate::config::{LangPref, Settings, ThemePref};
+use crate::config::{IconColor, LangPref, Settings, ThemePref, TrayIcon};
 use crate::hotkeys::{Action, AppAction, Combo};
 use crate::icons;
+use crate::mark::{self, MarkScene};
+use crate::mark_render;
 use crate::placement::{self, Edge, Rect as PxRect};
 use crate::sys;
 use crate::texts::T;
@@ -330,6 +333,31 @@ pub struct Flyout {
     fitted: std::cell::Cell<Option<[i32; 2]>>,
     /// Блоки устройств на этом кадре — цели перетаскивания.
     targets: Vec<(String, Flow, Rect)>,
+    /// Знак в «О программе».
+    about: AboutMark,
+}
+
+/// Знак 56 в «О программе»: фейдеры при первом показе раздела после открытия «Настроек», в покое — как файл.
+struct AboutMark {
+    clock: Instant,
+    scene: MarkScene,
+    played: bool,
+    texture: Option<TextureHandle>,
+    /// Что сейчас в текстуре: размер в пикселях и положения ручек.
+    shown: Option<(u32, [i32; 2])>,
+}
+
+impl AboutMark {
+    fn new() -> AboutMark {
+        AboutMark {
+            clock: Instant::now(),
+            // Знак 56 и крупнее — полная геометрия.
+            scene: MarkScene::new(mark_render::home(64), mark::STRIKE_HZ, true),
+            played: false,
+            texture: None,
+            shown: None,
+        }
+    }
 }
 
 /// Тема из настроек; `KAMERTON_THEME` (проверка вида) важнее.
@@ -429,6 +457,7 @@ impl Flyout {
             placed: std::cell::Cell::new(None),
             fitted: std::cell::Cell::new(None),
             targets: Vec::new(),
+            about: AboutMark::new(),
         }
     }
 
@@ -444,6 +473,7 @@ impl Flyout {
             sys::place_normal(hwnd, r);
         }
         shared.state.store(OPEN, Ordering::SeqCst);
+        sys::set_window_icon(hwnd);
         let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
         f.mixer = true;
         Ok(f)
@@ -790,6 +820,10 @@ impl crate::shell::Content for Flyout {
         // во всю ширину.
         let bare = frame.inner_margin(egui::Margin::ZERO);
         self.targets.clear();
+        if self.page != Page::Settings {
+            // Ушли со страницы «Настройки» — в следующий раз знак в «О программе» сыграет снова.
+            self.about.played = false;
+        }
         if self.page != Page::Mixer {
             let shown = egui::CentralPanel::default()
                 .frame(frame)
@@ -1144,6 +1178,24 @@ impl Flyout {
             );
         });
 
+        // Значок в трее — свой раздел: подпись «Значок в трее» слева от переключателя не помещается.
+        ui.add_space(10.0);
+        anvil_ui::widgets::section_label(ui, T::TrayIcon.get());
+        anvil_ui::chrome::setting_row(ui, T::TrayStyle.get(), |ui| {
+            segmented_even(
+                ui,
+                &mut st.tray_icon,
+                &[(TrayIcon::Mark, None, T::TrayMark.get()), (TrayIcon::Speaker, None, T::TraySpeaker.get())],
+            );
+        });
+        anvil_ui::chrome::setting_row(ui, T::IconColor.get(), |ui| {
+            segmented_even(
+                ui,
+                &mut st.tray_color,
+                &[(IconColor::Purple, None, T::ColorPurple.get()), (IconColor::Azure, None, T::ColorAzure.get())],
+            );
+        });
+
         ui.add_space(10.0);
         anvil_ui::widgets::section_label(ui, T::WindowSection.get());
         anvil_ui::widgets::switch(ui, &mut st.animate, T::Animation.get());
@@ -1201,11 +1253,18 @@ impl Flyout {
 
         ui.add_space(10.0);
         anvil_ui::widgets::section_label(ui, T::About.get());
-        // Версия и «переносная копия» — разными строками: в одну по-русски не помещаются.
-        ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
-        if crate::config::portable_dir().is_some() {
-            anvil_ui::widgets::note(ui, T::Portable.get());
-        }
+        // Знак 56 слева; версия и «переносная копия» — разными строками: в одну по-русски не помещаются.
+        ui.horizontal(|ui| {
+            self.about_mark(ui);
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
+                if crate::config::portable_dir().is_some() {
+                    anvil_ui::widgets::note(ui, T::Portable.get());
+                }
+            });
+        });
         if let Some(u) = crate::update::get() {
             self.update_block(ui, u, &mut st);
         }
@@ -1219,8 +1278,45 @@ impl Flyout {
                 anvil_ui::lang::set_language(&ctx, kit_lang());
             }
             self.shared.wheel_outside.store(st.wheel_outside, Ordering::SeqCst);
+            let tray =
+                (st.tray_icon, st.tray_color, st.log_scale) != (before.tray_icon, before.tray_color, before.log_scale);
             st.save();
             *self.shared.settings.lock().unwrap() = st;
+            if tray {
+                // Значок в трее перечитает вид, цвет и шкалу.
+                crate::tray::refresh();
+            }
+        }
+    }
+
+    /// Знак 56 в «О программе»: фейдеры при первом показе после открытия «Настроек», потом — как файл.
+    fn about_mark(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
+        let still = !anvil_ui::motion::Motion::of(&ctx).enabled;
+        let a = &mut self.about;
+        let now = a.clock.elapsed().as_secs_f64();
+        if !a.played && ui.is_rect_visible(rect) {
+            a.played = true;
+            a.scene.sweep(now);
+        }
+        let px = (56.0 * ctx.pixels_per_point()).round() as u32;
+        let f = a.scene.frame(now, still);
+        let key = (px, [(f.l * 1000.0).round() as i32, (f.r * 1000.0).round() as i32]);
+        if a.shown != Some(key) {
+            let rgba = mark_render::mark(&f, px, IconColor::Purple);
+            let image = egui::ColorImage::from_rgba_unmultiplied([px as usize, px as usize], &rgba);
+            match &mut a.texture {
+                Some(t) => t.set(image, TextureOptions::LINEAR),
+                None => a.texture = Some(ctx.load_texture("kamerton-about-mark", image, TextureOptions::LINEAR)),
+            }
+            a.shown = Some(key);
+        }
+        if let Some(t) = &a.texture {
+            ui.painter().image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if a.scene.wants_frames(now, still) {
+            ctx.request_repaint();
         }
     }
 

@@ -88,6 +88,7 @@ pub enum T {
     Animation,
     WheelOutside,
     LogScale,
+    Osd,
     Autostart,
     About,
     ActPrev,
@@ -145,11 +146,13 @@ pub enum T {
     ColorPurple,
     ColorAzure,
     IconColorNote,
+    SearchSettings,
+    NothingFound,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 107] = [
+    pub const ALL: [T; 110] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -205,6 +208,7 @@ impl T {
         T::Animation,
         T::WheelOutside,
         T::LogScale,
+        T::Osd,
         T::Autostart,
         T::About,
         T::ActPrev,
@@ -257,6 +261,8 @@ impl T {
         T::ColorPurple,
         T::ColorAzure,
         T::IconColorNote,
+        T::SearchSettings,
+        T::NothingFound,
     ];
 
     /// (русский, английский)
@@ -320,6 +326,7 @@ impl T {
             T::Animation => ("Анимация открытия", "Opening animation"),
             T::WheelOutside => ("Колесо вне окна меняет громкость", "Wheel outside the window changes volume"),
             T::LogScale => ("Логарифмическая шкала", "Logarithmic scale"),
+            T::Osd => ("Плашка громкости", "Volume popup"),
             T::Autostart => ("Запускать при входе в Windows", "Start with Windows"),
             T::About => ("О программе", "About"),
             T::ActPrev => ("Предыдущее", "Previous"),
@@ -384,6 +391,8 @@ impl T {
             T::IconColorNote => {
                 ("Для трея, окна микшера и «О программе»", "Used by the tray, the mixer window and «About»")
             }
+            T::SearchSettings => ("Поиск по настройкам", "Search settings"),
+            T::NothingFound => ("Ничего не найдено", "Nothing found"),
         }
     }
 

@@ -61,6 +61,18 @@ pub fn place(anchor: Rect, work: Rect, edge: Edge, size: (i32, i32), gap: i32) -
     (x, y, h)
 }
 
+/// Место плашки громкости: по центру рабочей области вдоль панели задач, у её стороны (над панелью
+/// внизу, под ней сверху); при боковой панели — внизу по центру. `gap` — отступ от края рабочей области.
+pub fn place_osd(work: Rect, edge: Edge, size: (i32, i32), gap: i32) -> (i32, i32) {
+    let (w, h) = size;
+    let x = work.left + (work.right - work.left - w) / 2;
+    let y = match edge {
+        Edge::Top => work.top + gap,
+        _ => work.bottom - gap - h,
+    };
+    (x, y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +111,17 @@ mod tests {
         let right = Rect { right: 1858, ..MON };
         let icon = Rect { left: 1870, top: 1040, right: 1910, bottom: 1070 };
         assert_eq!(place(icon, right, Edge::Right, (360, 200), 12), (1858 - 12 - 360, 1080 - 12 - 200, 200));
+    }
+
+    #[test]
+    fn osd_is_centered_at_the_taskbar_side() {
+        let work = Rect { bottom: 1032, ..MON };
+        assert_eq!(place_osd(work, Edge::Bottom, (260, 56), 24), (830, 1032 - 24 - 56));
+        let top = Rect { top: 48, ..MON };
+        assert_eq!(place_osd(top, Edge::Top, (260, 56), 24), (830, 48 + 24));
+        // Боковая панель: плашка внизу по центру рабочей области.
+        let left = Rect { left: 62, ..MON };
+        assert_eq!(place_osd(left, Edge::Left, (260, 56), 24), (62 + (1858 - 260) / 2, 1080 - 24 - 56));
     }
 
     #[test]

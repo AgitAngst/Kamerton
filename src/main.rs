@@ -6,7 +6,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod cli;
 mod config;
+mod contrast;
 mod d3d;
 mod flyout;
 mod hotkeys;
@@ -15,6 +17,7 @@ mod mark;
 mod mark_render;
 mod placement;
 mod profiles;
+mod settings_search;
 mod shell;
 mod snap;
 mod sys;
@@ -40,9 +43,19 @@ Usage:
   kamerton --watch [--peaks] [--for <s>]
                              print audio events until Ctrl+C or for <s> seconds
                              (--peaks: levels every 500 ms)
+  kamerton --set <target> <volume>
+                             set volume: 0-100, 45%, +5 or -5 (relative to the current one)
+  kamerton --mute <target> [on|off|toggle]
+                             mute, unmute or toggle (toggle is the default)
+  kamerton --get <target>    print volume and mute state
   kamerton --help | --version
 
-Console modes only read; they never change volume or devices.";
+<target> is: default (default output device), input (default input device), an app name
+(as shown in the window, or its exe name without .exe) or a device name. Case does not matter;
+an exact name wins over a part of a name; if several apps or devices fit, nothing is changed.
+Exit codes: 0 done, 1 audio error, 2 bad arguments, 3 target not found or ambiguous.
+
+--list, --watch and --get only read; --set and --mute change volume and mute, never devices.";
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -97,6 +110,45 @@ fn watch(peaks: bool, limit: Option<Duration>) -> Result<(), audio::AudioError> 
     }
     drop(audio);
     println!("stopped, subscriptions left: {}", audio::live_subscriptions());
+    Ok(())
+}
+
+fn percent(v: f32) -> u32 {
+    (v * 100.0).round() as u32
+}
+
+/// `--set`, `--mute`, `--get`: своё ядро звука на время одной команды; трей узнаёт об изменении от Windows.
+fn run_command(cmd: cli::Command) -> Result<(), cli::CliError> {
+    use cli::{CliError, Command, EXIT_AUDIO, EXIT_TARGET};
+    let fail = |e: audio::AudioError| CliError {
+        code: if e == audio::AudioError::NotFound { EXIT_TARGET } else { EXIT_AUDIO },
+        message: e.to_string(),
+    };
+    let (audio, snapshot) = Audio::start(|| {}).map_err(fail)?;
+    let control = audio.control();
+    match cmd {
+        Command::Get(t) => {
+            let f = cli::find(&snapshot, &t)?;
+            println!("{}: volume {}%, {}", f.label, percent(f.volume()), if f.muted() { "muted" } else { "not muted" });
+        }
+        Command::Set(t, level) => {
+            let f = cli::find(&snapshot, &t)?;
+            let plan = cli::volumes(&f, level);
+            for (target, v) in &plan {
+                control.set_volume(target.clone(), *v).map_err(fail)?;
+            }
+            let top = plan.iter().map(|p| p.1).fold(0.0, f32::max);
+            println!("{}: volume {}%", f.label, percent(top));
+        }
+        Command::Mute(t, mode) => {
+            let f = cli::find(&snapshot, &t)?;
+            let muted = cli::muted_after(&f, mode);
+            for (target, _, _) in &f.items {
+                control.set_muted(target.clone(), muted).map_err(fail)?;
+            }
+            println!("{}: {}", f.label, if muted { "muted" } else { "not muted" });
+        }
+    }
     Ok(())
 }
 
@@ -245,6 +297,15 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    if let Some(parsed) = cli::parse(&args) {
+        match parsed.and_then(run_command) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("error: {}", e.message);
+                std::process::exit(e.code);
+            }
+        }
     }
     let result = if has("--version") {
         println!("Kamerton {}", env!("CARGO_PKG_VERSION"));

@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anvil_ui::Palette;
 use anvil_ui::motion::machine::Scene;
 use anvil_ui::theme::radius;
 use eframe::egui::{
@@ -23,6 +22,7 @@ use crate::icons;
 use crate::mark::{self, MarkScene};
 use crate::mark_render;
 use crate::placement::{self, Edge, Rect as PxRect};
+use crate::settings_search::{self, Item};
 use crate::sys;
 use crate::texts::T;
 
@@ -86,6 +86,25 @@ const REOPEN_GUARD_MS: u64 = 300;
 const HIDDEN: u8 = 0;
 const OPENING: u8 = 1;
 const OPEN: u8 = 2;
+/// Окно показано плашкой громкости (не окном микшера).
+const OSD: u8 = 3;
+
+/// Плашка громкости: размер, отступ от панели задач (логические пиксели), сколько держать, сдвиг при появлении.
+const OSD_W: f32 = 260.0;
+const OSD_H: f32 = 56.0;
+const OSD_GAP: f32 = 24.0;
+const OSD_SHOW: Duration = Duration::from_millis(1500);
+const OSD_SLIDE_PX: f32 = 8.0;
+
+/// Что показывает плашка: громкость и «без звука» устройства по умолчанию, место значка (по нему — монитор)
+/// и до какого времени держать.
+#[derive(Debug, Clone, Copy)]
+struct OsdInfo {
+    anchor: PxRect,
+    volume: f32,
+    muted: bool,
+    until: Instant,
+}
 
 /// Устройства одного направления: по умолчанию — первым.
 fn of_flow(s: &Snapshot, flow: Flow) -> Vec<&Device> {
@@ -197,6 +216,8 @@ pub struct Shared {
     pub wheel_outside: AtomicBool,
     /// Прогон на утечки: открыть, но не снимать плащ.
     ghost: AtomicBool,
+    /// Плашка громкости, пока показана (состояние `OSD`).
+    osd: Mutex<Option<OsdInfo>>,
 }
 
 impl Shared {
@@ -216,9 +237,35 @@ impl Shared {
             capturing: AtomicBool::new(false),
             wheel_outside: AtomicBool::new(false),
             ghost: AtomicBool::new(false),
+            osd: Mutex::new(None),
         };
         s.wheel_outside.store(wheel, Ordering::SeqCst);
         s
+    }
+
+    /// Показать плашку громкости (из потока трея) или продлить уже показанную. Окно микшера открыто или
+    /// открывается — плашки нет, оно само показывает громкость; выключено в настройках — тоже.
+    pub fn show_osd(&self, anchor: PxRect, volume: f32, muted: bool) {
+        if std::env::var_os("KAMERTON_TRACE").is_some() {
+            eprintln!(
+                "trace: osd requested, state {}, volume {volume}, muted {muted}",
+                self.state.load(Ordering::SeqCst)
+            );
+        }
+        if !self.settings.lock().unwrap().osd {
+            return;
+        }
+        if matches!(self.state.load(Ordering::SeqCst), OPEN | OPENING) {
+            return;
+        }
+        *self.osd.lock().unwrap() = Some(OsdInfo { anchor, volume, muted, until: Instant::now() + OSD_SHOW });
+        if self.state.compare_exchange(HIDDEN, OSD, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            // Как при открытии: показать под плащом, без фокуса, и попросить кадр напрямую.
+            let hwnd = self.hwnd.load(Ordering::SeqCst);
+            sys::show_noactivate(hwnd);
+            sys::invalidate(hwnd);
+        }
+        self.ctx.request_repaint();
     }
 
     /// Прогон на утечки: открыть как обычно, но оставить под плащом.
@@ -266,6 +313,8 @@ impl Shared {
             HIDDEN if sys::now_ms().saturating_sub(self.hidden_at.load(Ordering::SeqCst)) > REOPEN_GUARD_MS => {
                 self.open(anchor, true)
             }
+            // Плашка не окно микшера: щелчок по значку открывает его сразу.
+            OSD => self.open(anchor, true),
             _ => {}
         }
     }
@@ -276,6 +325,7 @@ impl Shared {
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!("trace: open requested at {} ms", sys::now_ms() % 100_000);
         }
+        *self.osd.lock().unwrap() = None;
         *self.pending.lock().unwrap() = Some((anchor, by_click));
         self.state.store(OPENING, Ordering::SeqCst);
         let hwnd = self.hwnd.load(Ordering::SeqCst);
@@ -338,6 +388,25 @@ pub struct Flyout {
     /// Окно микшера: каким цветом стоит его значок и был ли у окна фокус на прошлом кадре.
     icon_color: Option<IconColor>,
     had_focus: bool,
+    /// Запрос в поиске по «Настройкам».
+    search: String,
+    /// Плашка громкости: где поставлена; `None` — окно не в режиме плашки.
+    osd_at: Option<OsdPlace>,
+    /// Снять плащ после ближайшего `Present` — кадр плашки уже на месте.
+    osd_reveal: bool,
+}
+
+/// Где стоит плашка громкости: левый верхний угол и размер (физические пиксели), масштаб, сторона панели
+/// задач и начало сдвига при появлении.
+#[derive(Debug, Clone, Copy)]
+struct OsdPlace {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    scale: f32,
+    edge: Edge,
+    slide: Option<Instant>,
 }
 
 /// Знак 56 в «О программе»: фейдеры при первом показе раздела после открытия «Настроек», в покое — как файл.
@@ -423,7 +492,24 @@ impl Flyout {
         match std::env::var("KAMERTON_PAGE").as_deref() {
             Ok("hotkeys") => f.page = Page::Hotkeys,
             Ok("profiles") => f.page = Page::Profiles,
-            Ok("settings") => f.page = Page::Settings,
+            // `KAMERTON_SEARCH=<запрос>` — страница с запросом в поиске.
+            Ok("settings") => {
+                f.page = Page::Settings;
+                f.search = std::env::var("KAMERTON_SEARCH").unwrap_or_default();
+            }
+            // Вид плашки громкости: `KAMERTON_OSD=<проценты>[m]` (m — «без звука»), держится час.
+            Ok("osd") => {
+                let spec = std::env::var("KAMERTON_OSD").unwrap_or_default();
+                let volume: f32 = spec.trim_end_matches('m').parse().unwrap_or(45.0);
+                *f.shared.pending.lock().unwrap() = None;
+                *f.shared.osd.lock().unwrap() = Some(OsdInfo {
+                    anchor,
+                    volume: volume / 100.0,
+                    muted: spec.ends_with('m'),
+                    until: Instant::now() + Duration::from_secs(3600),
+                });
+                f.shared.state.store(OSD, Ordering::SeqCst);
+            }
             _ => {}
         }
         if f.page != Page::Mixer {
@@ -463,6 +549,9 @@ impl Flyout {
             about: AboutMark::new(),
             icon_color: None,
             had_focus: false,
+            search: String::new(),
+            osd_at: None,
+            osd_reveal: false,
         }
     }
 
@@ -493,7 +582,7 @@ impl Flyout {
         let snapshot = self.shared.visible(&all);
         self.all = all;
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
-        let p = Palette::of_ctx(&ctx);
+        let p = crate::contrast::palette(&ctx);
         self.targets.clear();
         let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(MIXER_MARGIN as i8));
         let mut content = Vec2::ZERO;
@@ -586,7 +675,7 @@ impl Flyout {
     /// Полоска идёт от середины к ручке, а не от левого края: иначе баланс похож на громкость 50 %.
     fn balance_row(&mut self, ui: &mut Ui, d: &Device, b: f32) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), BALANCE_ROW), Sense::hover());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         ui.painter().text(
             pos2(rect.left(), rect.top() + 9.0),
             Align2::LEFT_CENTER,
@@ -658,6 +747,114 @@ impl Flyout {
         sys::round_corners(self.hwnd, w, h, (radius::WINDOW as f32 * s.scale).round() as i32);
     }
 
+    /// Плашка громкости: маленькое окно у панели задач по центру, без фокуса, на `OSD_SHOW` после последнего
+    /// изменения. Громкость, «без звука» и время берёт из `Shared::osd`.
+    fn osd_ui(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let snapping = std::env::var_os("KAMERTON_SNAP").is_some();
+        let Some(info) = *self.shared.osd.lock().unwrap() else {
+            self.hide_osd();
+            return;
+        };
+        let now = Instant::now();
+        if now >= info.until {
+            self.hide_osd();
+            return;
+        }
+        let fresh = self.osd_at.is_none();
+        if std::env::var_os("KAMERTON_TRACE").is_some() {
+            eprintln!("trace: osd frame, fresh {fresh}");
+        }
+        let place = match self.osd_at {
+            Some(p) => p,
+            None => {
+                let spot = Spot::at(info.anchor);
+                let s = spot.scale;
+                let (w, h) = ((OSD_W * s).round() as i32, (OSD_H * s).round() as i32);
+                let (x, y) = placement::place_osd(spot.work, spot.edge, (w, h), (OSD_GAP * s).round() as i32);
+                let animate =
+                    self.shared.settings.lock().unwrap().animate && anvil_ui::motion::pref::animations_enabled();
+                sys::set_no_activate(self.hwnd, true);
+                sys::round_corners(self.hwnd, w, h, (radius::WINDOW as f32 * s).round() as i32);
+                let p = OsdPlace { x, y, w, h, scale: s, edge: spot.edge, slide: animate.then_some(now) };
+                self.osd_at = Some(p);
+                self.osd_reveal = true;
+                p
+            }
+        };
+        // Появление: сдвиг от панели задач на `OSD_SLIDE_PX` и на место, по кривой набора.
+        let mut off = 0;
+        if let Some(start) = place.slide {
+            let t = (start.elapsed().as_secs_f32() / SLIDE_SECS).min(1.0);
+            off = ((1.0 - anvil_ui::motion::curve::ease_out(t)) * OSD_SLIDE_PX * place.scale).round() as i32;
+            if t >= 1.0 {
+                self.osd_at = Some(OsdPlace { slide: None, ..place });
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if fresh || place.slide.is_some() {
+            if std::env::var_os("KAMERTON_TRACE").is_some() {
+                eprintln!("trace: osd at {},{} size {}x{}, offset {off}", place.x, place.y, place.w, place.h);
+            }
+            let dy = if place.edge == Edge::Top { -off } else { off };
+            sys::move_to(self.hwnd, place.x, place.y + dy, place.w, place.h);
+        }
+
+        let log = self.shared.settings.lock().unwrap().log_scale;
+        let p = crate::contrast::palette(&ctx);
+        let frame =
+            egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(radius::WINDOW);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            let r = ui.max_rect();
+            let cy = r.center().y;
+            let (fill, icon_color, number) =
+                if info.muted { (p.faint, p.warning, p.faint) } else { (p.accent, p.text, p.weak) };
+            let icon = Rect::from_center_size(pos2(r.left() + PAD_X + ICON / 2.0, cy), Vec2::splat(ICON));
+            icons::speaker(ui.painter(), icon, icon_color, info.volume, info.muted);
+            let right = r.right() - PAD_X;
+            ui.painter().text(
+                pos2(right, cy),
+                Align2::RIGHT_CENTER,
+                format!("{}", (info.volume * 100.0).round() as i32),
+                FontId::monospace(12.5),
+                number,
+            );
+            let track =
+                Rect::from_min_max(pos2(icon.right() + 12.0, cy - 2.0), pos2(right - NUMBER_W - 12.0, cy + 2.0));
+            ui.painter().rect_filled(track, CornerRadius::same(2), p.border_strong);
+            let done = Rect::from_min_max(
+                track.min,
+                pos2(track.left() + track.width() * model::to_pos(info.volume, log), track.bottom()),
+            );
+            if done.width() > 0.5 {
+                ui.painter().rect_filled(done, CornerRadius::same(2), fill);
+            }
+        });
+        if snapping && self.snap_check(&ctx) {
+            return;
+        }
+        ctx.request_repaint_after(info.until.saturating_duration_since(now));
+    }
+
+    /// Плашка закончилась: спрятать окно под плащ.
+    fn hide_osd(&mut self) {
+        self.end_osd();
+        *self.shared.osd.lock().unwrap() = None;
+        if self.shared.state.compare_exchange(OSD, HIDDEN, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            sys::cloak(self.hwnd, true);
+            sys::hide(self.hwnd);
+        }
+    }
+
+    /// Окно больше не плашка (она закончилась или открывают окно микшера): снова берёт фокус от щелчка.
+    fn end_osd(&mut self) {
+        if self.osd_at.take().is_some() {
+            sys::set_no_activate(self.hwnd, false);
+        }
+        self.osd_reveal = false;
+    }
+
     /// Закрыть: в трее — под плащ и спрятать; отдельный процесс — выйти.
     fn close(&mut self, ctx: &egui::Context) {
         if self.standalone {
@@ -670,6 +867,7 @@ impl Flyout {
         self.placed.set(None);
         self.held.clear();
         self.page = Page::Mixer;
+        self.search.clear();
         self.stop_capture();
         self.reveal = false;
         self.shared.close.store(false, Ordering::SeqCst);
@@ -707,7 +905,7 @@ impl Flyout {
 
 impl crate::shell::Content for Flyout {
     fn clear(&self, ctx: &egui::Context) -> Color32 {
-        let p = Palette::of_ctx(ctx);
+        let p = crate::contrast::palette(ctx);
         if self.mixer { p.bg } else { p.card }
     }
 
@@ -718,6 +916,10 @@ impl crate::shell::Content for Flyout {
             if !self.standalone && self.shared.state.load(Ordering::SeqCst) == HIDDEN {
                 sys::hide(self.hwnd);
             }
+        }
+        if self.osd_reveal {
+            self.osd_reveal = false;
+            sys::cloak(self.hwnd, false);
         }
         if self.reveal {
             self.reveal = false;
@@ -755,6 +957,8 @@ impl crate::shell::Content for Flyout {
     fn ui(&mut self, ui: &mut Ui) {
         let ctx = &ui.ctx().clone();
         anvil_ui::motion::tick(ctx);
+        let theme = self.shared.settings.lock().unwrap().theme;
+        crate::contrast::follow(ctx, theme_choice(theme));
         let log = self.shared.settings.lock().unwrap().log_scale;
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("kamerton-log-scale"), log));
         if self.mixer {
@@ -764,6 +968,7 @@ impl crate::shell::Content for Flyout {
         }
         let opening = self.shared.pending.lock().unwrap().take();
         if let Some((anchor, by_click)) = opening {
+            self.end_osd();
             self.spot = Some(Spot::at(anchor));
             self.by_click = by_click;
             self.was_focused = false;
@@ -776,6 +981,10 @@ impl crate::shell::Content for Flyout {
             }
             self.layout();
         }
+        if self.shared.state.load(Ordering::SeqCst) == OSD {
+            self.osd_ui(ui);
+            return;
+        }
         // Первый кадр в трее рисуем целиком (окно за экранами и под плащом): прогрев — значки программ,
         // глифы шрифтов, текстуры. Иначе первый щелчок ждал бы их ~0,2 с.
         let warming = !self.started && !self.standalone;
@@ -786,7 +995,9 @@ impl crate::shell::Content for Flyout {
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
         let lost = self.by_click && self.was_focused && !focused;
         let asked = self.shared.close.load(Ordering::SeqCst);
-        let esc = self.capture.is_none() && ctx.input(|i| i.key_pressed(Key::Escape));
+        // Esc на «Настройках» с запросом в поиске очищает запрос, а не закрывает окно.
+        let searching = self.page == Page::Settings && !self.search.is_empty();
+        let esc = self.capture.is_none() && !searching && ctx.input(|i| i.key_pressed(Key::Escape));
         if !warming && (lost || asked || esc) {
             self.close(ctx);
             return;
@@ -818,7 +1029,7 @@ impl crate::shell::Content for Flyout {
             self.layout();
         }
 
-        let p = Palette::of_ctx(ctx);
+        let p = crate::contrast::palette(ctx);
         let frame = egui::Frame::new()
             .fill(p.card)
             .stroke(Stroke::new(1.0, p.border_strong))
@@ -894,7 +1105,7 @@ impl crate::shell::Content for Flyout {
 
 fn note_row(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), EMPTY_ROW), Sense::hover());
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     ui.painter().text(
         pos2(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
@@ -1071,7 +1282,7 @@ impl Flyout {
         kind: Option<icons::DeviceKind>,
     ) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_ROW), Sense::hover());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         let capturing = self.capture.as_ref() == Some(&slot);
         let taken = combo.is_some() && self.shared.hotkey_free.lock().unwrap().get(&slot.key()).copied() == Some(false);
         let text_w = |text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_string(), font, p.text).size().x;
@@ -1145,142 +1356,190 @@ impl Flyout {
         ui.horizontal(|ui| {
             if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
                 self.page = Page::Mixer;
+                self.search.clear();
             }
             ui.label(egui::RichText::new(T::Settings.get()).font(anvil_ui::semibold(14.5)));
         });
         ui.add_space(6.0);
+        // Поиск по строкам страницы; Esc очищает запрос, а не закрывает окно (см. `ui`).
+        if !self.search.is_empty() && ui.input(|i| i.key_pressed(Key::Escape)) {
+            self.search.clear();
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text(T::SearchSettings.get())
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(6.0);
+        let query = self.search.clone();
+        let show = |i: Item| settings_search::shown(&query, i);
         let mut st = self.shared.settings.lock().unwrap().clone();
         let before = st.clone();
 
         // Переходы на другие страницы — первыми, строками со стрелкой, а не кнопками внутри раздела.
-        let (hotkeys, profiles) = nav_rows(ui);
+        let (hotkeys, profiles) = nav_rows(ui, [show(Item::Hotkeys), show(Item::Profiles)]);
         if hotkeys {
             self.page = Page::Hotkeys;
         }
         if profiles {
             self.page = Page::Profiles;
         }
+        if !settings_search::any(&query, &settings_search::ALL) {
+            anvil_ui::widgets::note(ui, T::NothingFound.get());
+        }
 
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::Appearance.get());
-        anvil_ui::chrome::setting_row(ui, T::Theme.get(), |ui| {
-            segmented_even(
-                ui,
-                &mut st.theme,
-                &[
-                    (ThemePref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
-                    (ThemePref::Light, Some(anvil_ui::Icon::Sun), T::ThemeLight.get()),
-                    (ThemePref::Dark, Some(anvil_ui::Icon::Moon), T::ThemeDark.get()),
-                ],
-            );
-        });
-        anvil_ui::chrome::setting_row(ui, T::Language.get(), |ui| {
-            segmented_even(
-                ui,
-                &mut st.lang,
-                &[
-                    (LangPref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
-                    (LangPref::Ru, None, "Русский"),
-                    (LangPref::En, None, "English"),
-                ],
-            );
-        });
+        if settings_search::any(&query, &[Item::Theme, Item::Language]) {
+            ui.add_space(10.0);
+            anvil_ui::widgets::section_label(ui, T::Appearance.get());
+        }
+        if show(Item::Theme) {
+            anvil_ui::chrome::setting_row(ui, T::Theme.get(), |ui| {
+                segmented_even(
+                    ui,
+                    &mut st.theme,
+                    &[
+                        (ThemePref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
+                        (ThemePref::Light, Some(anvil_ui::Icon::Sun), T::ThemeLight.get()),
+                        (ThemePref::Dark, Some(anvil_ui::Icon::Moon), T::ThemeDark.get()),
+                    ],
+                );
+            });
+        }
+        if show(Item::Language) {
+            anvil_ui::chrome::setting_row(ui, T::Language.get(), |ui| {
+                segmented_even(
+                    ui,
+                    &mut st.lang,
+                    &[
+                        (LangPref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
+                        (LangPref::Ru, None, "Русский"),
+                        (LangPref::En, None, "English"),
+                    ],
+                );
+            });
+        }
 
         // Значок — свой раздел: вид в трее и цвет, который берут трей, окно микшера и «О программе».
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::IconSection.get());
-        anvil_ui::chrome::setting_row(ui, T::InTray.get(), |ui| {
-            segmented_even(
-                ui,
-                &mut st.tray_icon,
-                &[(TrayIcon::Mark, None, T::TrayMark.get()), (TrayIcon::Speaker, None, T::TraySpeaker.get())],
-            );
-        });
-        anvil_ui::chrome::setting_row(ui, T::IconColor.get(), |ui| {
-            segmented_even(
-                ui,
-                &mut st.tray_color,
-                &[(IconColor::Purple, None, T::ColorPurple.get()), (IconColor::Azure, None, T::ColorAzure.get())],
-            );
-        });
-        anvil_ui::widgets::note(ui, T::IconColorNote.get());
-
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::WindowSection.get());
-        anvil_ui::widgets::switch(ui, &mut st.animate, T::Animation.get());
-        anvil_ui::widgets::switch(ui, &mut st.wheel_outside, T::WheelOutside.get());
-        anvil_ui::widgets::switch(ui, &mut st.log_scale, T::LogScale.get());
-
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::ThemeSystem.get());
-        let mut auto = sys::autostart();
-        if anvil_ui::widgets::switch(ui, &mut auto, T::Autostart.get()).changed() {
-            sys::set_autostart(auto);
+        if settings_search::any(&query, &[Item::TrayIcon, Item::IconColor]) {
+            ui.add_space(10.0);
+            anvil_ui::widgets::section_label(ui, T::IconSection.get());
         }
-
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::Hidden.get());
-        if st.hidden_apps.is_empty() && st.hidden_devices.is_empty() {
-            anvil_ui::widgets::note(ui, T::NothingHidden.get());
-        }
-        let all = self.all.clone();
-        let mut show_app = None;
-        for exe in &st.hidden_apps {
-            let name = all
-                .devices
-                .iter()
-                .flat_map(|d| d.apps.iter())
-                .find(|a| &a.key.exe == exe)
-                .map(app_name)
-                .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_string());
-            anvil_ui::chrome::setting_row(ui, &name, |ui| {
-                if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
-                    show_app = Some(exe.clone());
-                }
+        if show(Item::TrayIcon) {
+            anvil_ui::chrome::setting_row(ui, T::InTray.get(), |ui| {
+                segmented_even(
+                    ui,
+                    &mut st.tray_icon,
+                    &[(TrayIcon::Mark, None, T::TrayMark.get()), (TrayIcon::Speaker, None, T::TraySpeaker.get())],
+                );
             });
         }
-        let mut show_dev = None;
-        for id in &st.hidden_devices {
-            let name = all
-                .devices
-                .iter()
-                .find(|d| &d.id == id)
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| T::NotConnected.get().to_string());
-            anvil_ui::chrome::setting_row(ui, &name, |ui| {
-                if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
-                    show_dev = Some(id.clone());
-                }
+        if show(Item::IconColor) {
+            anvil_ui::chrome::setting_row(ui, T::IconColor.get(), |ui| {
+                segmented_even(
+                    ui,
+                    &mut st.tray_color,
+                    &[(IconColor::Purple, None, T::ColorPurple.get()), (IconColor::Azure, None, T::ColorAzure.get())],
+                );
             });
         }
-        if let Some(e) = show_app {
-            st.hidden_apps.remove(&e);
-        }
-        if let Some(d) = show_dev {
-            st.hidden_devices.remove(&d);
+        if settings_search::any(&query, &[Item::TrayIcon, Item::IconColor]) {
+            anvil_ui::widgets::note(ui, T::IconColorNote.get());
         }
 
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::About.get());
-        // Знак 56 слева; версия и «переносная копия» — разными строками: в одну по-русски не помещаются.
-        let color = st.tray_color;
-        ui.horizontal(|ui| {
-            self.about_mark(ui, color);
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
-                if crate::config::portable_dir().is_some() {
-                    anvil_ui::widgets::note(ui, T::Portable.get());
-                }
+        if settings_search::any(&query, &[Item::Animation, Item::WheelOutside, Item::LogScale, Item::Osd]) {
+            ui.add_space(10.0);
+            anvil_ui::widgets::section_label(ui, T::WindowSection.get());
+        }
+        if show(Item::Animation) {
+            anvil_ui::widgets::switch(ui, &mut st.animate, T::Animation.get());
+        }
+        if show(Item::WheelOutside) {
+            anvil_ui::widgets::switch(ui, &mut st.wheel_outside, T::WheelOutside.get());
+        }
+        if show(Item::LogScale) {
+            anvil_ui::widgets::switch(ui, &mut st.log_scale, T::LogScale.get());
+        }
+        if show(Item::Osd) {
+            anvil_ui::widgets::switch(ui, &mut st.osd, T::Osd.get());
+        }
+
+        if show(Item::Autostart) {
+            ui.add_space(10.0);
+            anvil_ui::widgets::section_label(ui, T::ThemeSystem.get());
+            let mut auto = sys::autostart();
+            if anvil_ui::widgets::switch(ui, &mut auto, T::Autostart.get()).changed() {
+                sys::set_autostart(auto);
+            }
+        }
+
+        if show(Item::Hidden) {
+            ui.add_space(10.0);
+            anvil_ui::widgets::section_label(ui, T::Hidden.get());
+            if st.hidden_apps.is_empty() && st.hidden_devices.is_empty() {
+                anvil_ui::widgets::note(ui, T::NothingHidden.get());
+            }
+            let all = self.all.clone();
+            let mut show_app = None;
+            for exe in &st.hidden_apps {
+                let name = all
+                    .devices
+                    .iter()
+                    .flat_map(|d| d.apps.iter())
+                    .find(|a| &a.key.exe == exe)
+                    .map(app_name)
+                    .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_string());
+                anvil_ui::chrome::setting_row(ui, &name, |ui| {
+                    if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
+                        show_app = Some(exe.clone());
+                    }
+                });
+            }
+            let mut show_dev = None;
+            for id in &st.hidden_devices {
+                let name = all
+                    .devices
+                    .iter()
+                    .find(|d| &d.id == id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| T::NotConnected.get().to_string());
+                anvil_ui::chrome::setting_row(ui, &name, |ui| {
+                    if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
+                        show_dev = Some(id.clone());
+                    }
+                });
+            }
+            if let Some(e) = show_app {
+                st.hidden_apps.remove(&e);
+            }
+            if let Some(d) = show_dev {
+                st.hidden_devices.remove(&d);
+            }
+        }
+
+        if show(Item::About) {
+            ui.add_space(10.0);
+            anvil_ui::widgets::section_label(ui, T::About.get());
+            // Знак 56 слева; версия и «переносная копия» — разными строками: в одну по-русски не помещаются.
+            let color = st.tray_color;
+            ui.horizontal(|ui| {
+                self.about_mark(ui, color);
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
+                    if crate::config::portable_dir().is_some() {
+                        anvil_ui::widgets::note(ui, T::Portable.get());
+                    }
+                });
             });
-        });
-        if let Some(u) = crate::update::get() {
-            self.update_block(ui, u, &mut st);
+            if let Some(u) = crate::update::get() {
+                self.update_block(ui, u, &mut st);
+            }
         }
 
         if st != before {
-            if st.theme != before.theme {
+            // При высоком контрасте тему задаёт система; выбор из настроек вступит в силу, когда его выключат.
+            if st.theme != before.theme && !crate::contrast::active(&ctx) {
                 anvil_ui::choose(&ctx, theme_choice(st.theme));
             }
             if st.lang != before.lang {
@@ -1626,7 +1885,7 @@ impl Flyout {
         ui.add_space(8.0);
         anvil_ui::widgets::divider(ui);
         ui.add_space(6.0);
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         ui.label(egui::RichText::new(T::HotkeysHint.get()).size(12.0).color(p.weak));
         ui.add_space(3.0);
         ui.label(egui::RichText::new(T::AppHotkeysHint.get()).size(12.0).color(p.weak));
@@ -1646,7 +1905,7 @@ impl Flyout {
 /// Подпись раздела страницы сочетаний: как `section_label` набора, в строке точной высоты.
 fn hotkey_group(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_GROUP), Sense::hover());
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     ui.painter().text(
         pos2(rect.left(), rect.bottom() - 9.0),
         Align2::LEFT_CENTER,
@@ -1659,7 +1918,7 @@ fn hotkey_group(ui: &mut Ui, text: &str) {
 /// Подпись над сочетаниями устройств: «Сделать основным:» — что делает сочетание.
 fn hotkey_caption(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_CAPTION), Sense::hover());
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     ui.painter().text(
         pos2(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
@@ -1671,13 +1930,23 @@ fn hotkey_caption(ui: &mut Ui) {
 
 /// Переходы со страницы настроек: «Горячие клавиши» и «Профили» — строки со значком и стрелкой в рамке
 /// `border`, под курсором — подложка `hover`. Возвращает, по какой щёлкнули.
-fn nav_rows(ui: &mut Ui) -> (bool, bool) {
-    let (frame, _) = ui.allocate_exact_size(vec2(ui.available_width(), 2.0 * NAV_ROW + 1.0), Sense::hover());
-    let p = Palette::of(ui);
+fn nav_rows(ui: &mut Ui, show: [bool; 2]) -> (bool, bool) {
+    let rows = show.iter().filter(|s| **s).count();
+    if rows == 0 {
+        return (false, false);
+    }
+    let height = rows as f32 * NAV_ROW + (rows - 1) as f32;
+    let (frame, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let p = crate::contrast::palette(ui.ctx());
     ui.painter().rect_stroke(frame, radius::CARD, Stroke::new(1.0, p.border), StrokeKind::Inside);
     let mut clicked = [false; 2];
+    let mut k = 0;
     for (i, text) in [T::Hotkeys.get(), T::Profiles.get()].into_iter().enumerate() {
-        let top = frame.top() + i as f32 * (NAV_ROW + 1.0);
+        if !show[i] {
+            continue;
+        }
+        let top = frame.top() + k as f32 * (NAV_ROW + 1.0);
+        k += 1;
         let row = Rect::from_min_size(pos2(frame.left(), top), vec2(frame.width(), NAV_ROW)).shrink(1.0);
         let r = ui.interact(row, ui.id().with(("nav", i)), Sense::click());
         if r.hovered() {
@@ -1699,7 +1968,7 @@ fn nav_rows(ui: &mut Ui) -> (bool, bool) {
         );
         let arrow = Rect::from_center_size(pos2(row.right() - 8.0 - 8.0, row.center().y), Vec2::splat(16.0));
         anvil_ui::icons::paint(ui.painter(), arrow, anvil_ui::Icon::ArrowRight, p.weak);
-        if i == 0 {
+        if k == 1 && rows == 2 {
             let y = frame.top() + NAV_ROW + 0.5;
             ui.painter().line_segment(
                 [pos2(frame.left() + 12.0, y), pos2(frame.right() - 12.0, y)],
@@ -1716,7 +1985,7 @@ fn nav_rows(ui: &mut Ui) -> (bool, bool) {
 /// Переключатель из равных сегментов ширины `SEGMENTED_W`: «Тема» и «Язык» стоят одной колонкой. Как
 /// `segmented` набора, только ширина сегмента не зависит от подписи.
 fn segmented_even<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, options: &[(V, Option<anvil_ui::Icon>, &str)]) {
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     let font = FontId::proportional(13.0);
     let (rect, response) = ui.allocate_exact_size(vec2(SEGMENTED_W, 30.0), Sense::hover());
     ui.painter().rect(rect, radius::CONTROL + 1, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
@@ -1760,7 +2029,7 @@ fn segmented_even<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, options: &[(V
 /// Заголовок раздела окна у значка: полужирный 14, `text`, с полем 16.
 fn section_title(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_ROW), Sense::hover());
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     ui.painter().text(
         pos2(rect.left() + PAD_X, rect.center().y + 2.0),
         Align2::LEFT_CENTER,
@@ -1773,7 +2042,7 @@ fn section_title(ui: &mut Ui, text: &str) {
 /// Черта между разделами: 4 + 1 + 4, с полями 16.
 fn divider_row(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), DIVIDER), Sense::hover());
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     let y = rect.center().y;
     ui.painter()
         .line_segment([pos2(rect.left() + PAD_X, y), pos2(rect.right() - PAD_X, y)], Stroke::new(1.0, p.border));
@@ -1813,7 +2082,7 @@ impl Flyout {
         });
         divider_row(ui);
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), MIXER_HEADER), Sense::hover());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         ui.painter().text(
             pos2(rect.left() + PAD_X, rect.center().y),
             Align2::LEFT_CENTER,
@@ -1841,7 +2110,7 @@ impl Flyout {
     /// его программ не слышно, хотя их ползунки целы; «Включить» снимает «без звука» с устройства.
     fn muted_banner(&mut self, ui: &mut Ui, d: &Device) {
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), MUTED_ROW), Sense::hover());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         let rect = Rect::from_min_max(
             pos2(row.left() + PAD_X, row.top() + 2.0),
             pos2(row.right() - PAD_X, row.bottom() - 6.0),
@@ -1883,7 +2152,7 @@ impl Flyout {
     /// Полоса внизу: «Другие параметры звука» со значком «наружу» (откроются Параметры Windows), справа
     /// «Профили» и кнопка устройств ввода — микрофон со стрелкой.
     fn footer(&mut self, ui: &mut Ui, rect: Rect) {
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         // Внутри рамки окна: снизу углы скруглены, как у окна.
         let fill = Rect::from_min_max(rect.min + vec2(1.0, 0.0), rect.max - vec2(1.0, 1.0));
         let round = radius::WINDOW.saturating_sub(1);
@@ -1946,7 +2215,7 @@ impl Flyout {
     fn device_item(&mut self, ui: &mut Ui, d: &Device, peak: f32) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ITEM_ROW), Sense::hover());
         let row = ui.interact(rect, ui.id().with(("devitem", &d.id)), Sense::click());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         if d.is_default || row.hovered() {
             ui.painter().rect_filled(rect, radius::CONTROL, p.raised);
         }
@@ -2026,7 +2295,7 @@ impl Flyout {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), DEVICE_ROW), Sense::hover());
         // Правый щелчок по строке — меню; ползунок и кнопка лежат поверх и ловят свои щелчки сами.
         let row = ui.interact(rect, ui.id().with(("devrow", &d.id)), Sense::click());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         let right = rect.right();
         let button = Rect::from_center_size(pos2(right - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
         let number = Rect::from_min_max(
@@ -2090,7 +2359,7 @@ impl Flyout {
     ) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), APP_ROW), Sense::hover());
         let row = ui.interact(rect, ui.id().with(("approw", key_id(&a.key))), Sense::click());
-        let p = Palette::of(ui);
+        let p = crate::contrast::palette(ui.ctx());
         let ctx = ui.ctx().clone();
         let icon_rect = Rect::from_min_size(pos2(rect.left(), rect.center().y - ICON / 2.0), Vec2::splat(ICON));
         if let Some(tex) = if a.system { None } else { self.icon_for(&ctx, a) } {
@@ -2209,7 +2478,7 @@ impl Flyout {
     fn finish_drag(&mut self, ctx: &egui::Context) {
         let Some(drag) = egui::DragAndDrop::payload::<DragApp>(ctx) else { return };
         let pointer = ctx.input(|i| i.pointer.interact_pos());
-        let p = Palette::of_ctx(ctx);
+        let p = crate::contrast::palette(ctx);
         let layer = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("kamerton-drag")));
         let mut over = None;
         for (id, flow, rect) in &self.targets {
@@ -2264,7 +2533,7 @@ fn text_clipped(ui: &mut Ui, rect: Rect, text: &str, font: FontId, color: Color3
 }
 
 fn number_text(ui: &mut Ui, rect: Rect, v: f32, muted: bool) {
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     let color = if muted { p.faint } else { p.weak };
     ui.painter().text(
         pos2(rect.right(), rect.center().y),
@@ -2277,7 +2546,7 @@ fn number_text(ui: &mut Ui, rect: Rect, v: f32, muted: bool) {
 
 /// Кнопка «без звука»: динамик 17 в кнопке-значке 30, как `icon_button` набора.
 fn mute_button(ui: &mut Ui, rect: Rect, id: egui::Id, level: f32, muted: bool) -> egui::Response {
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     let response = ui.interact(rect, id, Sense::click());
     let hovered = response.hovered() || response.is_pointer_button_down_on();
     if hovered {
@@ -2300,7 +2569,7 @@ fn mute_button(ui: &mut Ui, rect: Rect, id: egui::Id, level: f32, muted: bool) -
 /// Кнопка устройств ввода внизу окна: микрофон и стрелка (вниз — показать, вверх — скрыть) — понятно и
 /// без подсказки. Раскрыто — подложка `raised`, как у выбранного.
 fn inputs_toggle(ui: &mut Ui, expanded: bool) -> egui::Response {
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(TOGGLE_W, BUTTON), Sense::click());
     let hovered = response.hovered() || response.is_pointer_button_down_on();
     if hovered {
@@ -2349,7 +2618,7 @@ fn slider_scaled(
     log: bool,
     origin: f32,
 ) -> SliderOut {
-    let p = Palette::of(ui);
+    let p = crate::contrast::palette(ui.ctx());
     let response = ui.interact(rect, id, Sense::drag());
     let track = Rect::from_min_max(
         pos2(rect.left() + 7.0, rect.center().y - 2.0),

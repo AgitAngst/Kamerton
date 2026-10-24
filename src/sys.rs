@@ -112,6 +112,21 @@ pub fn post_close(raw: isize) {
     }
 }
 
+/// Окно не берёт фокус от щелчка (стиль `WS_EX_NOACTIVATE`) — для плашки громкости.
+pub fn set_no_activate(raw: isize, on: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd(raw), GWL_EXSTYLE);
+        let flag = WS_EX_NOACTIVATE.0 as isize;
+        let next = if on { style | flag } else { style & !flag };
+        if next != style {
+            SetWindowLongPtrW(hwnd(raw), GWL_EXSTYLE, next);
+        }
+    }
+}
+
 /// Дать окну фокус — только когда его открыл щелчок пользователя.
 pub fn activate(raw: isize) {
     unsafe {

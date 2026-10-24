@@ -183,13 +183,9 @@ fn run_hotkey(hwnd: HWND, id: i32) {
             ctx.shared.toggle(anchor);
         }
         Bound::Global(Action::Mixer) => open_mixer(),
-        Bound::Global(Action::Louder) => {
-            let _ = c.adjust_default(STEP);
-        }
-        Bound::Global(Action::Quieter) => {
-            let _ = c.adjust_default(-STEP);
-        }
-        Bound::Global(Action::Mute) => toggle_default_mute(c),
+        Bound::Global(Action::Louder) => adjust_default(hwnd, STEP),
+        Bound::Global(Action::Quieter) => adjust_default(hwnd, -STEP),
+        Bound::Global(Action::Mute) => toggle_default_mute(hwnd, c),
         Bound::Global(a @ (Action::NextOutput | Action::PrevOutput)) => {
             if let Ok(s) = c.snapshot() {
                 let outs: Vec<&crate::audio::Device> = s.devices.iter().filter(|d| d.flow == Flow::Render).collect();
@@ -310,6 +306,31 @@ fn start_cycle(hwnd: HWND) {
     });
 }
 
+/// Проверка плашки без колеса и клавиш (`KAMERTON_OSD_DEMO=1`): через 2 с и ещё раз через 0,8 с показать плашку
+/// с нынешней громкостью устройства по умолчанию — ничего не меняя.
+fn start_osd_demo() {
+    if std::env::var_os("KAMERTON_OSD_DEMO").is_none() {
+        return;
+    }
+    std::thread::spawn(|| {
+        for pause in [2000, 800] {
+            std::thread::sleep(std::time::Duration::from_millis(pause));
+            let h = TRAY_HWND.load(Ordering::SeqCst);
+            let ctx = CTX.get().expect("tray context");
+            let state = ctx
+                .control
+                .snapshot()
+                .ok()
+                .and_then(|s| s.devices.into_iter().find(|d| d.flow == Flow::Render && d.is_default));
+            if let Some(d) = state
+                && h != 0
+            {
+                show_osd(sys::hwnd(h), d.volume, d.muted);
+            }
+        }
+    });
+}
+
 /// Окно трея (0 — трей не запущен).
 pub fn hwnd() -> isize {
     TRAY_HWND.load(Ordering::SeqCst)
@@ -393,6 +414,7 @@ fn run(control: Control, shared: Arc<Shared>) {
         // Вернулись в сеанс (разблокировка, смена пользователя, удалённый стол) — пересоздать ядро звука.
         let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         start_cycle(hwnd);
+        start_osd_demo();
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), Some(instance.into()), 0).ok();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -682,12 +704,39 @@ fn menu_devices(control: &Control) -> Vec<(String, String, bool)> {
         .unwrap_or_default()
 }
 
-/// «Без звука» у устройства вывода по умолчанию — средний щелчок по значку.
-fn toggle_default_mute(control: &Control) {
+/// «Без звука» у устройства вывода по умолчанию — средний щелчок по значку и сочетание клавиш.
+fn toggle_default_mute(hwnd: HWND, control: &Control) {
     if let Ok(s) = control.snapshot()
         && let Some(d) = s.devices.iter().find(|d| d.flow == Flow::Render && d.is_default)
     {
-        let _ = control.set_muted(Target::Device(d.id.clone()), !d.muted);
+        let muted = !d.muted;
+        if control.set_muted(Target::Device(d.id.clone()), muted).is_ok() {
+            show_osd(hwnd, d.volume, muted);
+        }
+    }
+}
+
+/// Плашка громкости у значка: устройство вывода по умолчанию стало таким (если плашка включена).
+fn show_osd(hwnd: HWND, volume: f32, muted: bool) {
+    let ctx = CTX.get().expect("tray context");
+    let anchor = icon_rect(hwnd).unwrap_or_else(|| {
+        let (x, y) = sys::cursor();
+        Rect { left: x, top: y, right: x + 1, bottom: y + 1 }
+    });
+    ctx.shared.show_osd(anchor, volume, muted);
+}
+
+/// Сдвинуть громкость устройства вывода по умолчанию (колесо, «Громче», «Тише») и показать плашку.
+fn adjust_default(hwnd: HWND, delta: f32) {
+    let ctx = CTX.get().expect("tray context");
+    if let Ok(v) = ctx.control.adjust_default(delta) {
+        let muted = ctx
+            .control
+            .snapshot()
+            .ok()
+            .and_then(|s| s.devices.into_iter().find(|d| d.flow == Flow::Render && d.is_default))
+            .is_some_and(|d| d.muted);
+        show_osd(hwnd, v, muted);
     }
 }
 
@@ -789,7 +838,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         ctx.shared.toggle(anchor);
                     }
                     WM_CONTEXTMENU => show_menu(hwnd, x, y),
-                    WM_MBUTTONUP => toggle_default_mute(&ctx.control),
+                    WM_MBUTTONUP => toggle_default_mute(hwnd, &ctx.control),
                     WM_MOUSEMOVE => update_rect(hwnd),
                     _ => {}
                 }
@@ -810,7 +859,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_WHEEL => {
-                let _ = ctx.control.adjust_default(wheel_step(wparam.0 as u16 as i16));
+                adjust_default(hwnd, wheel_step(wparam.0 as u16 as i16));
                 LRESULT(0)
             }
             WM_REFRESH => {

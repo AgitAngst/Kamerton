@@ -49,6 +49,8 @@ pub struct Settings {
     pub wheel_outside: bool,
     /// Логарифмическая (квадратичная) шкала ползунков: `log_scale=1`.
     pub log_scale: bool,
+    /// Плашка громкости при изменении колесом над значком и сочетаниями: `osd=1`.
+    pub osd: bool,
     /// Вид значка в трее: `tray_icon=mark|speaker`.
     pub tray_icon: TrayIcon,
     /// Цвет значка в трее: `tray_color=purple|azure`.
@@ -93,6 +95,7 @@ impl Default for Settings {
             animate: true,
             wheel_outside: false,
             log_scale: false,
+            osd: true,
             tray_icon: TrayIcon::Mark,
             tray_color: IconColor::Purple,
             hidden_apps: BTreeSet::new(),
@@ -178,6 +181,8 @@ impl Settings {
                 s.wheel_outside = on;
             } else if k == "log_scale" {
                 s.log_scale = on;
+            } else if k == "osd" {
+                s.osd = on;
             } else if k == "tray_icon" {
                 s.tray_icon = if v == "speaker" { TrayIcon::Speaker } else { TrayIcon::Mark };
             } else if k == "tray_color" {
@@ -274,10 +279,11 @@ impl Settings {
         };
         out.push_str(&format!("theme={theme}\nlang={lang}\n"));
         out.push_str(&format!(
-            "animate={}\nwheel_outside={}\nlog_scale={}\n",
+            "animate={}\nwheel_outside={}\nlog_scale={}\nosd={}\n",
             b(self.animate),
             b(self.wheel_outside),
-            b(self.log_scale)
+            b(self.log_scale),
+            b(self.osd)
         ));
         let icon = match self.tray_icon {
             TrayIcon::Mark => "mark",
@@ -389,7 +395,7 @@ mod tests {
         assert!(s.expanded);
         assert_eq!(
             s.format(),
-            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\ntray_icon=mark\ntray_color=purple\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
+            "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nosd=1\ntray_icon=mark\ntray_color=purple\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
         );
         assert_eq!(Settings::parse(&s.format()), s);
     }
@@ -475,6 +481,14 @@ mod tests {
         assert!(s.hidden_apps.contains(r"c:\apps\noisy.exe"));
         assert!(s.hidden_devices.contains("{0.0.0.00000000}.{demo}"));
         assert_eq!(s.mixer_rect, Some([10, 20, 900, 500]));
+        assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn osd_setting_round_trip() {
+        assert!(Settings::parse("").osd);
+        let s = Settings::parse("osd=0\n");
+        assert!(!s.osd);
         assert_eq!(Settings::parse(&s.format()), s);
     }
 

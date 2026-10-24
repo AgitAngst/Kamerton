@@ -128,6 +128,17 @@ pub fn speaker(painter: &Painter, rect: Rect, color: Color32, level: f32, muted:
     }
 }
 
+/// «Правила» в сетке 24 × 24: три дорожки с ручками на разных местах.
+pub fn rules(painter: &Painter, rect: Rect, color: Color32) {
+    let s = rect.width() / 24.0;
+    let p = |x: f32, y: f32| -> Pos2 { pos2(rect.left() + x * s, rect.top() + y * s) };
+    let stroke = Stroke::new((1.7 * s).max(1.2), color);
+    for (y, knob) in [(6.0, 15.0), (12.0, 8.0), (18.0, 17.0)] {
+        painter.line_segment([p(3.5, y), p(20.5, y)], stroke);
+        painter.circle(p(knob, y), 2.6 * s, Color32::TRANSPARENT, stroke);
+    }
+}
+
 /// «Наружу» в сетке 24 × 24: рамка со стрелкой из угла — ссылка открывает другое окно (Параметры Windows).
 pub fn external(painter: &Painter, rect: Rect, color: Color32) {
     let s = rect.width() / 24.0;

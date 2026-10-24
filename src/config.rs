@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use crate::hotkeys::{Action, AppAction, Combo};
 pub use crate::mark_render::IconColor;
 use crate::profiles::{AppState, Memory, Profile};
+use crate::rules::{AppRule, DeviceAct, When};
 
 /// Тема окна.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -69,6 +70,18 @@ pub struct Settings {
     pub app_hotkeys: BTreeMap<(AppAction, String), Combo>,
     /// Сочетание на устройство — сделать его основным: `devhotkey.<id устройства>=<сочетание>`.
     pub device_hotkeys: BTreeMap<String, Combo>,
+    /// Потолок громкости устройства вывода по умолчанию, проценты 1..99: `limit_device=80`.
+    pub limit_device: Option<u8>,
+    /// Потолки программ, проценты 1..99: `limit_app.<путь exe в нижнем регистре>=60`.
+    pub limit_apps: BTreeMap<String, u8>,
+    /// Автоприглушение: `duck=1`.
+    pub duck: bool,
+    /// До какой доли своей громкости приглушать остальные, проценты 5..95: `duck_level=30`.
+    pub duck_level: u8,
+    /// Главные программы приглушения: строки `duck_app=<путь exe>`.
+    pub duck_apps: BTreeSet<String>,
+    /// Правила по программам: `rule.<N>.app|when|device|volume|muted=…`.
+    pub rules: Vec<AppRule>,
     /// Запоминать громкость программ: `remember=1`.
     pub remember: bool,
     /// Громкость новых программ, проценты: `newapp_volume=50`; нет строки — выключено.
@@ -105,6 +118,12 @@ impl Default for Settings {
             hotkeys: BTreeMap::new(),
             app_hotkeys: BTreeMap::new(),
             device_hotkeys: BTreeMap::new(),
+            limit_device: None,
+            limit_apps: BTreeMap::new(),
+            duck: false,
+            duck_level: 30,
+            duck_apps: BTreeSet::new(),
+            rules: Vec::new(),
             remember: true,
             new_app_volume: None,
             check_updates: true,
@@ -140,6 +159,11 @@ fn percent(v: &str) -> Option<f32> {
     v.trim().parse::<u8>().ok().filter(|p| *p <= 100).map(|p| p as f32 / 100.0)
 }
 
+/// Потолок: проценты 1..99 (100 — то же, что «нет», 0 — тишина, а не потолок).
+fn cap(v: &str) -> Option<u8> {
+    v.trim().parse::<u8>().ok().filter(|p| (1..=99).contains(p))
+}
+
 fn pct(v: f32) -> u32 {
     (v.clamp(0.0, 1.0) * 100.0).round() as u32
 }
@@ -153,6 +177,7 @@ impl Settings {
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
         let mut profiles: BTreeMap<usize, Profile> = BTreeMap::new();
+        let mut rules: BTreeMap<usize, AppRule> = BTreeMap::new();
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=').map(|(k, v)| (k.trim(), v.trim())) else {
                 if !line.trim().is_empty() {
@@ -217,6 +242,41 @@ impl Settings {
                 {
                     s.memory.insert(exe.to_lowercase(), (vol, muted == "1"));
                 }
+            } else if k == "limit_device" {
+                s.limit_device = cap(v);
+            } else if let Some(exe) = k.strip_prefix("limit_app.") {
+                if let Some(c) = cap(v)
+                    && !exe.is_empty()
+                {
+                    s.limit_apps.insert(exe.to_lowercase(), c);
+                }
+            } else if k == "duck" {
+                s.duck = on;
+            } else if k == "duck_level" {
+                if let Ok(l) = v.parse::<u8>() {
+                    s.duck_level = l.clamp(5, 95);
+                }
+            } else if k == "duck_app" && !v.is_empty() {
+                s.duck_apps.insert(v.to_lowercase());
+            } else if let Some(rest) = k.strip_prefix("rule.") {
+                // Неверная строка правила — пропустить без падения.
+                let Some((n, field)) = rest.split_once('.') else { continue };
+                let Ok(n) = n.parse::<usize>() else { continue };
+                let r = rules.entry(n).or_default();
+                match field {
+                    "app" => r.app = v.to_lowercase(),
+                    "when" => r.when = When::from_text(v).unwrap_or_default(),
+                    "device" => r.device = DeviceAct::from_text(v),
+                    "volume" => r.volume = v.parse::<u8>().ok().filter(|p| *p <= 100),
+                    "muted" => {
+                        r.muted = match v {
+                            "1" => Some(true),
+                            "0" => Some(false),
+                            _ => None,
+                        }
+                    }
+                    _ => {}
+                }
             } else if let Some(rest) = k.strip_prefix("profile.") {
                 // Неверная строка профиля — пропустить без падения.
                 let Some((n, field)) = rest.split_once('.') else { continue };
@@ -261,6 +321,7 @@ impl Settings {
             }
         }
         s.profiles = profiles.into_values().filter(|p| !p.name.is_empty()).collect();
+        s.rules = rules.into_values().filter(|r| !r.app.is_empty()).collect();
         s
     }
 
@@ -311,6 +372,35 @@ impl Settings {
         }
         if let Some(v) = self.new_app_volume {
             out.push_str(&format!("newapp_volume={v}\n"));
+        }
+        if let Some(c) = self.limit_device {
+            out.push_str(&format!("limit_device={c}\n"));
+        }
+        for (exe, c) in &self.limit_apps {
+            out.push_str(&format!("limit_app.{exe}={c}\n"));
+        }
+        if self.duck {
+            out.push_str("duck=1\n");
+        }
+        if self.duck_level != 30 {
+            out.push_str(&format!("duck_level={}\n", self.duck_level));
+        }
+        for exe in &self.duck_apps {
+            out.push_str(&format!("duck_app={exe}\n"));
+        }
+        for (n, r) in self.rules.iter().enumerate() {
+            out.push_str(&format!(
+                "rule.{n}.app={}\nrule.{n}.when={}\nrule.{n}.device={}\n",
+                r.app,
+                r.when.to_text(),
+                r.device.to_text()
+            ));
+            if let Some(v) = r.volume {
+                out.push_str(&format!("rule.{n}.volume={v}\n"));
+            }
+            if let Some(m) = r.muted {
+                out.push_str(&format!("rule.{n}.muted={}\n", if m { 1 } else { 0 }));
+            }
         }
         for (a, c) in &self.hotkeys {
             out.push_str(&format!("hotkey.{}={}\n", a.key(), c.to_text()));
@@ -482,6 +572,40 @@ mod tests {
         assert!(s.hidden_devices.contains("{0.0.0.00000000}.{demo}"));
         assert_eq!(s.mixer_rect, Some([10, 20, 900, 500]));
         assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn limits_duck_and_rules_round_trip() {
+        let text = concat!(
+            "limit_device=80\n",
+            "limit_app.C:\\Apps\\Ads.exe=40\n",
+            "limit_app.bad.exe=100\n",
+            "limit_app.zero.exe=0\n",
+            "duck=1\nduck_level=200\n",
+            "duck_app=C:\\Apps\\Call.exe\n",
+            "rule.0.app=C:\\Apps\\Game.exe\n",
+            "rule.0.when=device:{0.0.0.00000000}.{phones}\n",
+            "rule.0.device={0.0.0.00000000}.{phones}\n",
+            "rule.0.volume=70\nrule.0.muted=0\n",
+            "rule.1.when=running\n",
+            "rule.2.app=player.exe\nrule.2.volume=300\nrule.2.muted=maybe\nrule.x.app=nope\n",
+        );
+        let s = Settings::parse(text);
+        assert_eq!(s.limit_device, Some(80));
+        assert_eq!(s.limit_apps.len(), 1);
+        assert_eq!(s.limit_apps[r"c:\apps\ads.exe"], 40);
+        assert!(s.duck);
+        assert_eq!(s.duck_level, 95, "доля зажата в 5..95");
+        assert!(s.duck_apps.contains(r"c:\apps\call.exe"));
+        // Правило без программы отброшено; громкость сверх 100 и неверное «без звука» — не заданы.
+        assert_eq!(s.rules.len(), 2);
+        assert_eq!(s.rules[0].when, When::WithDevice("{0.0.0.00000000}.{phones}".into()));
+        assert_eq!(s.rules[0].device, DeviceAct::Device("{0.0.0.00000000}.{phones}".into()));
+        assert_eq!((s.rules[0].volume, s.rules[0].muted), (Some(70), Some(false)));
+        assert_eq!((s.rules[1].volume, s.rules[1].muted), (None, None));
+        assert_eq!(Settings::parse(&s.format()), s);
+        let d = Settings::parse("");
+        assert!(!d.duck && d.duck_level == 30 && d.limit_device.is_none() && d.rules.is_empty());
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub struct Profile {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     SetDefault(String),
+    /// Громкость устройства (потолок).
+    SetDeviceVolume(String, f32),
     SetVolume(AppKey, f32),
     SetMuted(AppKey, bool),
     Move(AppKey, Option<String>),

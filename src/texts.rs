@@ -148,11 +148,33 @@ pub enum T {
     IconColorNote,
     SearchSettings,
     NothingFound,
+    Rules,
+    LimitSection,
+    LimitDevice,
+    LimitNote,
+    AddApp,
+    DuckSection,
+    DuckSwitch,
+    DuckLevel,
+    DuckApps,
+    DuckNote,
+    RulesSection,
+    NoRules,
+    AddRule,
+    RuleWhen,
+    WhenRunning,
+    WhenWith,
+    RuleDevice,
+    KeepDevice,
+    RuleVolume,
+    RuleMute,
+    PickApp,
+    DeleteRuleConfirm,
 }
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 110] = [
+    pub const ALL: [T; 132] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -263,6 +285,28 @@ impl T {
         T::IconColorNote,
         T::SearchSettings,
         T::NothingFound,
+        T::Rules,
+        T::LimitSection,
+        T::LimitDevice,
+        T::LimitNote,
+        T::AddApp,
+        T::DuckSection,
+        T::DuckSwitch,
+        T::DuckLevel,
+        T::DuckApps,
+        T::DuckNote,
+        T::RulesSection,
+        T::NoRules,
+        T::AddRule,
+        T::RuleWhen,
+        T::WhenRunning,
+        T::WhenWith,
+        T::RuleDevice,
+        T::KeepDevice,
+        T::RuleVolume,
+        T::RuleMute,
+        T::PickApp,
+        T::DeleteRuleConfirm,
     ];
 
     /// (русский, английский)
@@ -393,6 +437,33 @@ impl T {
             }
             T::SearchSettings => ("Поиск по настройкам", "Search settings"),
             T::NothingFound => ("Ничего не найдено", "Nothing found"),
+            T::Rules => ("Правила", "Rules"),
+            T::LimitSection => ("Потолок громкости", "Volume limit"),
+            T::LimitDevice => ("Общий (устройство по умолчанию)", "Overall (default device)"),
+            T::LimitNote => {
+                ("Громкость выше потолка возвращается на потолок.", "Volume above the limit is brought back to it.")
+            }
+            T::AddApp => ("Добавить программу…", "Add an app…"),
+            T::DuckSection => ("Приглушение", "Ducking"),
+            T::DuckSwitch => ("Приглушать остальные программы", "Quiet the other apps"),
+            T::DuckLevel => ("Приглушать до (от прежней громкости)", "Quiet down to (of the old volume)"),
+            T::DuckApps => ("Главные программы", "Priority apps"),
+            T::DuckNote => (
+                "Пока они звучат, остальные тише; потом всё возвращается.",
+                "While they play the others are quieter; then everything returns.",
+            ),
+            T::RulesSection => ("Правила по программам", "Rules for apps"),
+            T::NoRules => ("Правил пока нет", "No rules yet"),
+            T::AddRule => ("Добавить правило", "Add a rule"),
+            T::RuleWhen => ("Когда", "When"),
+            T::WhenRunning => ("Программа запущена", "The app is running"),
+            T::WhenWith => ("Подключено устройство:", "Device connected:"),
+            T::RuleDevice => ("Устройство", "Device"),
+            T::KeepDevice => ("Не менять", "Keep"),
+            T::RuleVolume => ("Задать громкость", "Set the volume"),
+            T::RuleMute => ("Выключить звук", "Mute"),
+            T::PickApp => ("Выберите программу", "Pick an app"),
+            T::DeleteRuleConfirm => ("Удалить правило?", "Delete the rule?"),
         }
     }
 

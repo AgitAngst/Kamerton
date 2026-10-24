@@ -3,7 +3,7 @@
 // устройства по умолчанию (хук мыши), вид значка — знак программы или колонка по громкости с движением
 // (`mark` — ход, `mark_render` — кадр).
 
-use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -31,14 +31,16 @@ use windows::core::{PCWSTR, w};
 
 use anvil_ui::motion::machine::{Presenter, Scene, Show};
 
-use crate::audio::{Control, Flow, Roles, Snapshot, Target, model};
+use crate::audio::{Control, Event, Flow, Roles, Snapshot, Target, model};
 use crate::config::{IconColor, TrayIcon};
+use crate::duck::{self, Ducker};
 use crate::flyout::Shared;
 use crate::hotkeys::{Action, AppAction, Combo, next_output};
 use crate::mark::{self, MarkFrame, MarkScene, SpeakerFrame, SpeakerScene};
 use crate::mark_render;
 use crate::placement::Rect;
 use crate::profiles::{self, Cmd};
+use crate::rules;
 use crate::sys;
 use crate::texts::T;
 
@@ -53,6 +55,9 @@ const SAVE_TIMER: usize = 1;
 const UPDATE_TIMER: usize = 2;
 /// Кадры значка — только пока знак движется.
 const MARK_TIMER: usize = 3;
+/// Приглушение: шаг 250 мс, только пока оно включено.
+const DUCK_TIMER: usize = 4;
+const DUCK_STEP_MS: u32 = 250;
 const WM_HOTKEY: u32 = 0x0312;
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_CONSOLE_CONNECT: usize = 0x1;
@@ -80,6 +85,12 @@ const CMD_PROFILE: u32 = 500;
 
 /// Последний снимок трея — от него считается разница по каждому `refresh`.
 static LAST: Mutex<Option<Snapshot>> = Mutex::new(None);
+
+/// Приглушённые программы и идёт ли таймер приглушения.
+static DUCKER: Mutex<Option<Ducker>> = Mutex::new(None);
+static DUCK_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Начало отсчёта времени для приглушения.
+static CLOCK: OnceLock<Instant> = OnceLock::new();
 
 /// Окно трея — для `refresh` из потока звука и для хука.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -221,6 +232,7 @@ pub fn run_cmds(c: &Control, cmds: Vec<Cmd>) {
     for cmd in cmds {
         let _ = match cmd {
             Cmd::SetDefault(id) => c.set_default(&id, Roles::All),
+            Cmd::SetDeviceVolume(id, v) => c.set_volume(Target::Device(id), v),
             Cmd::SetVolume(k, v) => c.set_volume(Target::App(k), v),
             Cmd::SetMuted(k, m) => c.set_muted(Target::App(k), m),
             Cmd::Move(k, to) => c.move_app(k, to),
@@ -248,13 +260,28 @@ fn react_to_changes(hwnd: HWND) {
     let ctx = CTX.get().expect("tray context");
     let Ok(now) = ctx.control.snapshot() else { return };
     let prev = LAST.lock().unwrap().replace(now.clone());
+    sync_duck(hwnd, &now);
+    // Потолок — по снимку, а не по событиям: проверяется и при запуске, и после правки настроек.
+    let (limit_device, limit_apps) = {
+        let st = ctx.shared.settings.lock().unwrap();
+        (st.limit_device, st.limit_apps.clone())
+    };
+    run_cmds(&ctx.control, rules::limit_cmds(&now, limit_device, &limit_apps));
     let Some(prev) = prev else { return };
-    let events = model::diff(&prev, &now);
+    let mut events = model::diff(&prev, &now);
+    // Приглушённая громкость не память: события приглушённых программ профили не видят.
+    if let Some(d) = DUCKER.lock().unwrap().as_ref() {
+        events.retain(|e| match e {
+            Event::AppChanged(a) => !d.is_ducked(&a.key),
+            _ => true,
+        });
+    }
     if events.is_empty() {
         return;
     }
-    let (cmds, dirty, profile) = {
+    let (cmds, dirty, profile, rule_cmds) = {
         let mut st = ctx.shared.settings.lock().unwrap();
+        let rule_cmds = rules::rule_cmds(&events, &now, &st.rules);
         let list = st.profiles.clone();
         let rules = profiles::Rules {
             remember: st.remember,
@@ -262,9 +289,9 @@ fn react_to_changes(hwnd: HWND) {
             profiles: &list,
         };
         let mut mem = std::mem::take(&mut st.memory);
-        let out = profiles::react(&events, &now, &rules, &mut mem);
+        let (cmds, dirty, profile) = profiles::react(&events, &now, &rules, &mut mem);
         st.memory = mem;
-        out
+        (cmds, dirty, profile, rule_cmds)
     };
     if dirty {
         unsafe {
@@ -275,6 +302,67 @@ fn react_to_changes(hwnd: HWND) {
     if let Some(i) = profile {
         run_profile(&ctx.shared, &ctx.control, i);
     }
+    // Правила идут после памяти и профилей: что задано правилом, побеждает.
+    run_cmds(&ctx.control, rule_cmds);
+}
+
+/// Включить или выключить таймер приглушения по настройкам; выключили — вернуть приглушённое.
+fn sync_duck(hwnd: HWND, now: &Snapshot) {
+    let ctx = CTX.get().expect("tray context");
+    let want = {
+        let st = ctx.shared.settings.lock().unwrap();
+        st.duck && !st.duck_apps.is_empty()
+    };
+    let running = DUCK_RUNNING.load(Ordering::SeqCst);
+    if want && !running {
+        if std::env::var_os("KAMERTON_TRACE").is_some() {
+            eprintln!("trace: duck timer on");
+        }
+        DUCK_RUNNING.store(true, Ordering::SeqCst);
+        unsafe {
+            let _ = SetTimer(Some(hwnd), DUCK_TIMER, DUCK_STEP_MS, None);
+        }
+    } else if !want && running {
+        DUCK_RUNNING.store(false, Ordering::SeqCst);
+        unsafe {
+            let _ = KillTimer(Some(hwnd), DUCK_TIMER);
+        }
+        release_duck(now);
+    }
+}
+
+/// Вернуть приглушённым их громкость (выключили приглушение, выход из программы).
+fn release_duck(now: &Snapshot) {
+    let ctx = CTX.get().expect("tray context");
+    let cmds = DUCKER.lock().unwrap().as_mut().map(|d| d.release_all(now)).unwrap_or_default();
+    run_cmds(&ctx.control, cmds);
+}
+
+/// Шаг приглушения (таймер): пики главных программ → команды.
+fn duck_tick() {
+    let ctx = CTX.get().expect("tray context");
+    let (level, priority) = {
+        let st = ctx.shared.settings.lock().unwrap();
+        (st.duck_level as f32 / 100.0, st.duck_apps.clone())
+    };
+    let Ok(now) = ctx.control.snapshot() else { return };
+    let peaks: std::collections::HashMap<crate::audio::AppKey, f32> = ctx
+        .control
+        .peaks()
+        .into_iter()
+        .filter_map(|(t, p)| match t {
+            Target::App(k) => Some((k, p)),
+            Target::Device(_) => None,
+        })
+        .collect();
+    let secs = CLOCK.get_or_init(Instant::now).elapsed().as_secs_f64();
+    let cmds = DUCKER.lock().unwrap().get_or_insert_with(Ducker::default).tick(
+        secs,
+        &now,
+        &peaks,
+        &duck::Config { level, priority: &priority },
+    );
+    run_cmds(&ctx.control, cmds);
 }
 
 /// Окно микшера — свой процесс `kamerton --mixer` (обычное окно, нужно редко).
@@ -415,6 +503,8 @@ fn run(control: Control, shared: Arc<Shared>) {
         let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         start_cycle(hwnd);
         start_osd_demo();
+        // Потолок и таймер приглушения — с первой минуты, а не с первого события звука.
+        refresh();
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), Some(instance.into()), 0).ok();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -872,6 +962,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 show_look(hwnd, None);
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == DUCK_TIMER => {
+                duck_tick();
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == UPDATE_TIMER => {
                 let settings = ctx.shared.settings.lock().unwrap().clone();
                 crate::update::tick(&settings);
@@ -897,7 +991,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_DESTROY => {
                 let _ = WTSUnRegisterSessionNotification(hwnd);
-                // Память громкости, ещё не записанная таймером.
+                // Приглушённое вернуть до выхода; память громкости, ещё не записанная таймером, — записать.
+                if let Ok(now) = ctx.control.snapshot() {
+                    release_duck(&now);
+                }
                 ctx.shared.settings.lock().unwrap().save();
                 // Значок убрать до выхода, иначе в трее остаётся «призрак» до наведения мыши.
                 let d = base_data(hwnd);

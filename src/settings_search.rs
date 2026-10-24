@@ -9,6 +9,7 @@ use crate::texts::T;
 pub enum Item {
     Hotkeys,
     Profiles,
+    Rules,
     Theme,
     Language,
     TrayIcon,
@@ -23,9 +24,10 @@ pub enum Item {
 }
 
 /// Все строки страницы по порядку.
-pub const ALL: [Item; 13] = [
+pub const ALL: [Item; 14] = [
     Item::Hotkeys,
     Item::Profiles,
+    Item::Rules,
     Item::Theme,
     Item::Language,
     Item::TrayIcon,
@@ -44,6 +46,10 @@ fn words(item: Item) -> (&'static [T], &'static [&'static str]) {
     match item {
         Item::Hotkeys => (&[T::Hotkeys], &["клавиши", "keyboard", "shortcut"]),
         Item::Profiles => (&[T::Profiles], &["наборы", "preset"]),
+        Item::Rules => (
+            &[T::Rules, T::LimitSection, T::DuckSection, T::RulesSection],
+            &["потолок", "лимит", "limit", "ceiling", "приглушение", "duck", "правило", "rule"],
+        ),
         Item::Theme => (
             &[T::Theme, T::Appearance, T::ThemeSystem, T::ThemeLight, T::ThemeDark],
             &["светлая", "тёмная", "dark", "light"],

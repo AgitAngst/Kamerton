@@ -1958,7 +1958,7 @@ impl Flyout {
         // `ITEM_PAD` плюс отступ списка `INSET` = `PAD_X` программ.
         let kind = icons::device_kind(&d.name, d.flow == Flow::Capture);
         let slot = Rect::from_min_size(pos2(rect.left() + ITEM_PAD, rect.center().y - ICON / 2.0), Vec2::splat(ICON));
-        icons::device(ui.painter(), Rect::from_center_size(slot.center(), Vec2::splat(16.0)), p.text, kind);
+        icons::device(ui.painter(), slot, p.text, kind);
         let left = slot.right() + 10.0;
         let button =
             Rect::from_center_size(pos2(rect.right() - ITEM_PAD - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
@@ -2037,7 +2037,7 @@ impl Flyout {
         // у края карточки и метка «Основное».
         let kind = icons::device_kind(&d.name, d.flow == Flow::Capture);
         let slot = Rect::from_min_size(pos2(rect.left(), rect.top() + 4.0), Vec2::splat(ICON));
-        icons::device(ui.painter(), Rect::from_center_size(slot.center(), Vec2::splat(16.0)), p.text, kind);
+        icons::device(ui.painter(), slot, p.text, kind);
         let left = slot.right() + 10.0;
         let mut name_right = number.left() - 8.0;
         if d.is_default {

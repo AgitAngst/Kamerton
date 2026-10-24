@@ -204,9 +204,10 @@ pub fn device(painter: &Painter, rect: Rect, color: Color32, kind: DeviceKind) {
     };
     match kind {
         DeviceKind::Speakers => {
-            r(6.0, 3.0, 18.0, 21.0, 2.0);
-            painter.circle_stroke(p(12.0, 14.0), 3.0 * s, stroke);
-            painter.circle_stroke(p(12.0, 7.5), 1.0 * s, stroke);
+            // Корпус по центру сетки (5…19 × 2…22), верхний динамик и нижний на одной оси x = 12.
+            r(5.0, 2.0, 19.0, 22.0, 2.5);
+            painter.circle_stroke(p(12.0, 7.0), 1.4 * s, stroke);
+            painter.circle_stroke(p(12.0, 15.0), 4.0 * s, stroke);
         }
         DeviceKind::Headphones => {
             arc(12.0, 13.0, 8.0, std::f32::consts::PI, 2.0 * std::f32::consts::PI);

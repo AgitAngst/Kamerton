@@ -335,6 +335,9 @@ pub struct Flyout {
     targets: Vec<(String, Flow, Rect)>,
     /// Знак в «О программе».
     about: AboutMark,
+    /// Окно микшера: каким цветом стоит его значок и был ли у окна фокус на прошлом кадре.
+    icon_color: Option<IconColor>,
+    had_focus: bool,
 }
 
 /// Знак 56 в «О программе»: фейдеры при первом показе раздела после открытия «Настроек», в покое — как файл.
@@ -343,8 +346,8 @@ struct AboutMark {
     scene: MarkScene,
     played: bool,
     texture: Option<TextureHandle>,
-    /// Что сейчас в текстуре: размер в пикселях и положения ручек.
-    shown: Option<(u32, [i32; 2])>,
+    /// Что сейчас в текстуре: размер в пикселях, цвет и положения ручек.
+    shown: Option<(u32, IconColor, [i32; 2])>,
 }
 
 impl AboutMark {
@@ -458,6 +461,8 @@ impl Flyout {
             fitted: std::cell::Cell::new(None),
             targets: Vec::new(),
             about: AboutMark::new(),
+            icon_color: None,
+            had_focus: false,
         }
     }
 
@@ -473,9 +478,11 @@ impl Flyout {
             sys::place_normal(hwnd, r);
         }
         shared.state.store(OPEN, Ordering::SeqCst);
-        sys::set_window_icon(hwnd);
+        let color = shared.settings.lock().unwrap().tray_color;
+        sys::set_window_icon(hwnd, color);
         let mut f = Flyout::make(audio, hwnd, shared, true, 0.0);
         f.mixer = true;
+        f.icon_color = Some(color);
         Ok(f)
     }
 
@@ -751,6 +758,7 @@ impl crate::shell::Content for Flyout {
         let log = self.shared.settings.lock().unwrap().log_scale;
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("kamerton-log-scale"), log));
         if self.mixer {
+            self.follow_icon_color(ctx);
             self.mixer_ui(ui);
             return;
         }
@@ -1178,10 +1186,10 @@ impl Flyout {
             );
         });
 
-        // Значок в трее — свой раздел: подпись «Значок в трее» слева от переключателя не помещается.
+        // Значок — свой раздел: вид в трее и цвет, который берут трей, окно микшера и «О программе».
         ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::TrayIcon.get());
-        anvil_ui::chrome::setting_row(ui, T::TrayStyle.get(), |ui| {
+        anvil_ui::widgets::section_label(ui, T::IconSection.get());
+        anvil_ui::chrome::setting_row(ui, T::InTray.get(), |ui| {
             segmented_even(
                 ui,
                 &mut st.tray_icon,
@@ -1195,6 +1203,7 @@ impl Flyout {
                 &[(IconColor::Purple, None, T::ColorPurple.get()), (IconColor::Azure, None, T::ColorAzure.get())],
             );
         });
+        anvil_ui::widgets::note(ui, T::IconColorNote.get());
 
         ui.add_space(10.0);
         anvil_ui::widgets::section_label(ui, T::WindowSection.get());
@@ -1254,8 +1263,9 @@ impl Flyout {
         ui.add_space(10.0);
         anvil_ui::widgets::section_label(ui, T::About.get());
         // Знак 56 слева; версия и «переносная копия» — разными строками: в одну по-русски не помещаются.
+        let color = st.tray_color;
         ui.horizontal(|ui| {
-            self.about_mark(ui);
+            self.about_mark(ui, color);
             ui.add_space(6.0);
             ui.vertical(|ui| {
                 ui.add_space(8.0);
@@ -1289,8 +1299,9 @@ impl Flyout {
         }
     }
 
-    /// Знак 56 в «О программе»: фейдеры при первом показе после открытия «Настроек», потом — как файл.
-    fn about_mark(&mut self, ui: &mut Ui) {
+    /// Знак 56 в «О программе» цветом из «Настроек»: фейдеры при первом показе после открытия «Настроек», потом —
+    /// как файл.
+    fn about_mark(&mut self, ui: &mut Ui, color: IconColor) {
         let ctx = ui.ctx().clone();
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
         let still = !anvil_ui::motion::Motion::of(&ctx).enabled;
@@ -1302,9 +1313,9 @@ impl Flyout {
         }
         let px = (56.0 * ctx.pixels_per_point()).round() as u32;
         let f = a.scene.frame(now, still);
-        let key = (px, [(f.l * 1000.0).round() as i32, (f.r * 1000.0).round() as i32]);
+        let key = (px, color, [(f.l * 1000.0).round() as i32, (f.r * 1000.0).round() as i32]);
         if a.shown != Some(key) {
-            let rgba = mark_render::mark(&f, px, IconColor::Purple);
+            let rgba = mark_render::mark(&f, px, color);
             let image = egui::ColorImage::from_rgba_unmultiplied([px as usize, px as usize], &rgba);
             match &mut a.texture {
                 Some(t) => t.set(image, TextureOptions::LINEAR),
@@ -1318,6 +1329,20 @@ impl Flyout {
         if a.scene.wants_frames(now, still) {
             ctx.request_repaint();
         }
+    }
+
+    /// Окно микшера — отдельный процесс и читает настройки при запуске: цвет значка перечитывается из файла, когда
+    /// окно получает фокус (его могли сменить в «Настройках» окна у значка).
+    fn follow_icon_color(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+        if focused && !self.had_focus {
+            let color = Settings::load().tray_color;
+            if self.icon_color != Some(color) {
+                sys::set_window_icon(self.hwnd, color);
+                self.icon_color = Some(color);
+            }
+        }
+        self.had_focus = focused;
     }
 
     /// «О программе»: состояние обновления, кнопка по состоянию, выключатели.
@@ -1796,19 +1821,6 @@ impl Flyout {
             anvil_ui::semibold(14.0),
             p.text,
         );
-        if output {
-            let gear =
-                Rect::from_center_size(pos2(rect.right() - 8.0 - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
-            let clicked = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(gear), |ui| {
-                    anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Settings.get()).clicked()
-                })
-                .inner;
-            if clicked {
-                self.page = Page::Settings;
-                self.focus_app = None;
-            }
-        }
         if let Some(d) = default_muted(devs) {
             self.muted_banner(ui, d);
         }
@@ -1900,13 +1912,18 @@ impl Flyout {
         }
         let buttons =
             Rect::from_min_max(pos2(link_rect.right() + 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
-        let (toggle, profiles) = ui
+        // Справа налево: кнопка устройств ввода в углу, черта, «Настройки», «Профили». Черта отделяет кнопку,
+        // которая раскрывает окно, от двух, которые ведут на страницы.
+        let (toggle, settings, profiles) = ui
             .scope_builder(
                 egui::UiBuilder::new().max_rect(buttons).layout(egui::Layout::right_to_left(egui::Align::Center)),
                 |ui| {
                     let t = inputs_toggle(ui, expanded).clicked();
+                    let (line, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
+                    ui.painter().line_segment([line.center_top(), line.center_bottom()], Stroke::new(1.0, p.border));
+                    let s = anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Gear, T::Settings.get()).clicked();
                     let pr = anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Layers, T::Profiles.get()).clicked();
-                    (t, pr)
+                    (t, s, pr)
                 },
             )
             .inner;
@@ -1917,6 +1934,10 @@ impl Flyout {
         }
         if profiles {
             self.page = Page::Profiles;
+        }
+        if settings {
+            self.page = Page::Settings;
+            self.focus_app = None;
         }
     }
 

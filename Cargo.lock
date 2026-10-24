@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "kamerton"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anvil-ui",
  "anvil-update",

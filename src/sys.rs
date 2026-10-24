@@ -319,18 +319,14 @@ pub fn icon_from_rgba(rgba: &[u8], size: i32) -> HICON {
     }
 }
 
-/// Значок окна (заголовок, панель задач, Alt+Tab) — знак программы в положениях файла, по DPI окна.
-pub fn set_window_icon(raw: isize) {
+/// Значок окна (заголовок, панель задач, Alt+Tab) — знак программы в положениях файла, по DPI окна, цветом из
+/// «Настроек». Прежний значок окна не освобождается: смена цвета редкая, утечка — пара значков.
+pub fn set_window_icon(raw: isize, color: crate::mark_render::IconColor) {
     unsafe {
         let dpi = GetDpiForWindow(hwnd(raw)).max(96);
         for (which, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
             let size = GetSystemMetricsForDpi(metric, dpi).max(16);
-            let rgba = crate::mark_render::mark(
-                &crate::mark_render::rest(size as u32),
-                size as u32,
-                crate::mark_render::IconColor::Purple,
-            );
-            // Окно живёт до выхода из процесса — значки не освобождаются.
+            let rgba = crate::mark_render::mark(&crate::mark_render::rest(size as u32), size as u32, color);
             let icon = icon_from_rgba(&rgba, size);
             SendMessageW(hwnd(raw), WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
         }

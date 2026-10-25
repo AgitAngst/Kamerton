@@ -961,10 +961,15 @@ impl Flyout {
     }
 }
 
-impl crate::shell::Content for Flyout {
+impl anvil_d3d::Content for Flyout {
     fn clear(&self, ctx: &egui::Context) -> Color32 {
         let p = crate::contrast::palette(ctx);
         if self.mixer { p.bg } else { p.card }
+    }
+
+    /// Медиа-клавиши громкости egui не отдаёт — запомнить для окна записи сочетания.
+    fn window_event(&mut self, event: &anvil_d3d::WindowEvent) {
+        crate::hotkeys::note_media_key(event);
     }
 
     fn after_present(&mut self) {

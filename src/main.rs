@@ -9,7 +9,6 @@ mod audio;
 mod cli;
 mod config;
 mod contrast;
-mod d3d;
 mod duck;
 mod flyout;
 mod hotkeys;
@@ -19,7 +18,6 @@ mod mark_render;
 mod placement;
 mod profiles;
 mod rules;
-mod shell;
 mod snap;
 mod sys;
 mod texts;
@@ -199,8 +197,8 @@ fn run_tray() -> Result<(), String> {
     texts::init();
     // Окно микшера живёт в этом же процессе с самого старта (спрятано под плащом): по щелчку оно
     // только встаёт на место и проявляется.
-    shell::run(
-        shell::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
+    anvil_d3d::run(
+        anvil_d3d::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
         Box::new(|ctx, hwnd| {
             let wake = ctx.clone();
             let (audio, snapshot) = Audio::start_quiet(move || {
@@ -218,7 +216,7 @@ fn run_tray() -> Result<(), String> {
                 repaint.request_repaint();
             });
             tray::start(audio.control(), shared.clone());
-            Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, &snapshot, shared)) as Box<dyn shell::Content>)
+            Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, &snapshot, shared)) as Box<dyn anvil_d3d::Content>)
         }),
     )
 }
@@ -234,9 +232,9 @@ fn run_mixer() -> Result<(), String> {
         sys::raise_window(title);
         return Ok(());
     };
-    shell::run(
-        shell::Config {
-            title,
+    anvil_d3d::run(
+        anvil_d3d::Config {
+            title: title.into(),
             size: [960.0, 560.0],
             decorations: true,
             // Размер — по числу устройств и программ (`Flyout::fit_mixer`).
@@ -247,7 +245,9 @@ fn run_mixer() -> Result<(), String> {
             position: snapping.then_some([-4000, -4000]),
             active: !snapping,
         },
-        Box::new(|ctx, hwnd| flyout::Flyout::mixer_window(ctx, hwnd).map(|f| Box::new(f) as Box<dyn shell::Content>)),
+        Box::new(|ctx, hwnd| {
+            flyout::Flyout::mixer_window(ctx, hwnd).map(|f| Box::new(f) as Box<dyn anvil_d3d::Content>)
+        }),
     )
 }
 
@@ -259,14 +259,14 @@ fn run_flyout(anchor: Option<&str>, passive: bool) -> Result<(), String> {
         let v: Vec<i32> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (v.len() == 4).then(|| placement::Rect { left: v[0], top: v[1], right: v[2], bottom: v[3] })
     });
-    shell::run(
-        shell::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
+    anvil_d3d::run(
+        anvil_d3d::Config::popup("Kamerton", [flyout::WIDTH, 200.0]),
         Box::new(move |ctx, hwnd| {
             // Снимок страницы настроек показывает и блок обновлений (без сети: проверка только по кнопке).
             if std::env::var_os("KAMERTON_SNAP").is_some() {
                 update::init(|| {});
             }
-            flyout::Flyout::standalone(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn shell::Content>)
+            flyout::Flyout::standalone(ctx, hwnd, anchor, passive).map(|f| Box::new(f) as Box<dyn anvil_d3d::Content>)
         }),
     )
 }

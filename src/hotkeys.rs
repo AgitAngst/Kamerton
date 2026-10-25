@@ -68,7 +68,7 @@ impl AppAction {
     }
 }
 
-/// Медиа-клавиши громкости: у них нет `egui::Key`, окно ловит их само (`shell.rs` → `note_media`).
+/// Медиа-клавиши громкости: у них нет `egui::Key`, окно ловит их само (`Content::window_event` → `note_media_key`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Media {
     Up,
@@ -104,7 +104,25 @@ impl Media {
 /// Последняя медиа-клавиша, нажатая в окне (0 — нет): окно записи сочетания забирает её в `take_media`.
 static MEDIA_PRESS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Запомнить нажатую медиа-клавишу (зовёт цикл окна).
+/// Событие окна → запомнить нажатую медиа-клавишу громкости (`Content::window_event`).
+pub fn note_media_key(event: &anvil_d3d::WindowEvent) {
+    use winit::event::ElementState;
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    if let anvil_d3d::WindowEvent::KeyboardInput { event, .. } = event
+        && event.state == ElementState::Pressed
+        && let PhysicalKey::Code(code) = event.physical_key
+    {
+        let media = match code {
+            KeyCode::AudioVolumeUp => Media::Up,
+            KeyCode::AudioVolumeDown => Media::Down,
+            KeyCode::AudioVolumeMute => Media::Mute,
+            _ => return,
+        };
+        note_media(media);
+    }
+}
+
+/// Запомнить нажатую медиа-клавишу.
 pub fn note_media(m: Media) {
     let n = Media::ALL.iter().position(|x| *x == m).unwrap_or(0) as u8 + 1;
     MEDIA_PRESS.store(n, std::sync::atomic::Ordering::SeqCst);

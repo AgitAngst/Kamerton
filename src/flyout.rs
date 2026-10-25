@@ -93,17 +93,20 @@ const OSD: u8 = 3;
 /// Плашка громкости: размер, отступ от панели задач (логические пиксели), сколько держать, сдвиг при появлении.
 const OSD_W: f32 = 260.0;
 const OSD_H: f32 = 56.0;
+/// Высота плашки с именем устройства (сочетания громкости устройства): имя над ползунком.
+const OSD_H_NAMED: f32 = 74.0;
 const OSD_GAP: f32 = 24.0;
 const OSD_SHOW: Duration = Duration::from_millis(1500);
 const OSD_SLIDE_PX: f32 = 8.0;
 
 /// Что показывает плашка: громкость и «без звука» устройства по умолчанию, место значка (по нему — монитор)
-/// и до какого времени держать.
-#[derive(Debug, Clone, Copy)]
+/// и до какого времени держать. `name` — устройство, если меняли не основное (сочетание громкости устройства).
+#[derive(Debug, Clone)]
 struct OsdInfo {
     anchor: PxRect,
     volume: f32,
     muted: bool,
+    name: Option<String>,
     until: Instant,
 }
 
@@ -246,7 +249,7 @@ impl Shared {
 
     /// Показать плашку громкости (из потока трея) или продлить уже показанную. Окно микшера открыто или
     /// открывается — плашки нет, оно само показывает громкость; выключено в настройках — тоже.
-    pub fn show_osd(&self, anchor: PxRect, volume: f32, muted: bool) {
+    pub fn show_osd(&self, anchor: PxRect, volume: f32, muted: bool, name: Option<String>) {
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!(
                 "trace: osd requested, state {}, volume {volume}, muted {muted}",
@@ -259,7 +262,7 @@ impl Shared {
         if matches!(self.state.load(Ordering::SeqCst), OPEN | OPENING) {
             return;
         }
-        *self.osd.lock().unwrap() = Some(OsdInfo { anchor, volume, muted, until: Instant::now() + OSD_SHOW });
+        *self.osd.lock().unwrap() = Some(OsdInfo { anchor, volume, muted, name, until: Instant::now() + OSD_SHOW });
         if self.state.compare_exchange(HIDDEN, OSD, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             // Как при открытии: показать под плащом, без фокуса, и попросить кадр напрямую.
             let hwnd = self.hwnd.load(Ordering::SeqCst);
@@ -508,6 +511,7 @@ impl Flyout {
                     anchor,
                     volume: volume / 100.0,
                     muted: spec.ends_with('m'),
+                    name: std::env::var("KAMERTON_OSD_NAME").ok(),
                     until: Instant::now() + Duration::from_secs(3600),
                 });
                 f.shared.state.store(OSD, Ordering::SeqCst);
@@ -754,7 +758,7 @@ impl Flyout {
     fn osd_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let snapping = std::env::var_os("KAMERTON_SNAP").is_some();
-        let Some(info) = *self.shared.osd.lock().unwrap() else {
+        let Some(info) = self.shared.osd.lock().unwrap().clone() else {
             self.hide_osd();
             return;
         };
@@ -763,16 +767,19 @@ impl Flyout {
             self.hide_osd();
             return;
         }
-        let fresh = self.osd_at.is_none();
+        let h_logical = if info.name.is_some() { OSD_H_NAMED } else { OSD_H };
+        // Плашка с именем выше обычной: сменилась — ставим окно заново.
+        let stale = self.osd_at.is_some_and(|p| p.h != (h_logical * p.scale).round() as i32);
+        let fresh = self.osd_at.is_none() || stale;
         if std::env::var_os("KAMERTON_TRACE").is_some() {
             eprintln!("trace: osd frame, fresh {fresh}");
         }
-        let place = match self.osd_at {
+        let place = match self.osd_at.filter(|_| !stale) {
             Some(p) => p,
             None => {
                 let spot = Spot::at(info.anchor);
                 let s = spot.scale;
-                let (w, h) = ((OSD_W * s).round() as i32, (OSD_H * s).round() as i32);
+                let (w, h) = ((OSD_W * s).round() as i32, (h_logical * s).round() as i32);
                 let (x, y) = placement::place_osd(spot.work, spot.edge, (w, h), (OSD_GAP * s).round() as i32);
                 let animate =
                     self.shared.settings.lock().unwrap().animate && anvil_ui::motion::pref::animations_enabled();
@@ -809,7 +816,13 @@ impl Flyout {
             egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(radius::WINDOW);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let r = ui.max_rect();
-            let cy = r.center().y;
+            // С именем устройства: имя сверху, ползунок ниже.
+            let cy = if info.name.is_some() { r.bottom() - OSD_H / 2.0 } else { r.center().y };
+            if let Some(name) = &info.name {
+                let line =
+                    Rect::from_min_max(pos2(r.left() + PAD_X, r.top() + 6.0), pos2(r.right() - PAD_X, r.top() + 24.0));
+                text_clipped(ui, line, name, FontId::proportional(11.5), p.weak);
+            }
             let (fill, icon_color, number) =
                 if info.muted { (p.faint, p.warning, p.faint) } else { (p.accent, p.text, p.weak) };
             let icon = Rect::from_center_size(pos2(r.left() + PAD_X + ICON / 2.0, cy), Vec2::splat(ICON));

@@ -229,7 +229,7 @@ fn run_hotkey(hwnd: HWND, id: i32) {
                 _ => c.set_volume(t, volume),
             };
             if done.is_ok() {
-                show_osd(hwnd, volume, muted);
+                show_osd(hwnd, volume, muted, Some(d.name.clone()));
             }
         }
         Bound::App(action, exe) => {
@@ -437,7 +437,7 @@ fn start_osd_demo() {
             if let Some(d) = state
                 && h != 0
             {
-                show_osd(sys::hwnd(h), d.volume, d.muted);
+                show_osd(sys::hwnd(h), d.volume, d.muted, None);
             }
         }
     });
@@ -825,19 +825,19 @@ fn toggle_default_mute(hwnd: HWND, control: &Control) {
     {
         let muted = !d.muted;
         if control.set_muted(Target::Device(d.id.clone()), muted).is_ok() {
-            show_osd(hwnd, d.volume, muted);
+            show_osd(hwnd, d.volume, muted, None);
         }
     }
 }
 
 /// Плашка громкости у значка: устройство вывода по умолчанию стало таким (если плашка включена).
-fn show_osd(hwnd: HWND, volume: f32, muted: bool) {
+fn show_osd(hwnd: HWND, volume: f32, muted: bool, name: Option<String>) {
     let ctx = CTX.get().expect("tray context");
     let anchor = icon_rect(hwnd).unwrap_or_else(|| {
         let (x, y) = sys::cursor();
         Rect { left: x, top: y, right: x + 1, bottom: y + 1 }
     });
-    ctx.shared.show_osd(anchor, volume, muted);
+    ctx.shared.show_osd(anchor, volume, muted, name);
 }
 
 /// Сдвинуть громкость устройства вывода по умолчанию (колесо, «Громче», «Тише») и показать плашку.
@@ -850,7 +850,7 @@ fn adjust_default(hwnd: HWND, delta: f32) {
             .ok()
             .and_then(|s| s.devices.into_iter().find(|d| d.flow == Flow::Render && d.is_default))
             .is_some_and(|d| d.muted);
-        show_osd(hwnd, v, muted);
+        show_osd(hwnd, v, muted, None);
     }
 }
 

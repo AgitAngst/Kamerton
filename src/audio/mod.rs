@@ -21,6 +21,9 @@ pub use win::live_subscriptions;
 
 /// Склеивать метки, пока они идут чаще этого.
 const QUIET: Duration = Duration::from_millis(30);
+/// Сколько раз и как часто перечитывать устройства, если какое-то не открылось.
+const DEVICE_RETRIES: u8 = 8;
+const DEVICE_RETRY: Duration = Duration::from_millis(1500);
 /// Но не дольше этого — иначе при перетаскивании ползунка снимок не обновится вовсе.
 const MAX_HOLD: Duration = Duration::from_millis(100);
 
@@ -263,8 +266,12 @@ fn run(
 
     // Ядро не пересоздалось — следующая попытка не раньше чем через 2 с.
     let mut retry: Option<Instant> = None;
+    // Устройство не открылось (только что включено) — список перечитывается позже: подряд не больше
+    // `DEVICE_RETRIES` раз, с паузой `DEVICE_RETRY`.
+    let mut again: Option<(Instant, u8)> = None;
     'outer: loop {
-        let msg = match retry {
+        let wake_at = [retry, again.map(|a| a.0)].into_iter().flatten().min();
+        let msg = match wake_at {
             Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(m) => Some(m),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -282,7 +289,14 @@ fn run(
                     break;
                 }
             }
-            None => marks.reset = true,
+            None => {
+                if retry.is_some_and(|at| at <= Instant::now()) {
+                    marks.reset = true;
+                }
+                if again.is_some_and(|a| a.0 <= Instant::now()) {
+                    marks.devices = true;
+                }
+            }
         }
         if !marks.any() {
             continue;
@@ -301,7 +315,12 @@ fn run(
         }
         let plan = marks.plan();
         if plan.devices {
-            engine.rescan_devices();
+            let tries = again.map_or(0, |a| a.1);
+            again = if engine.rescan_devices() && tries < DEVICE_RETRIES {
+                Some((Instant::now() + DEVICE_RETRY, tries + 1))
+            } else {
+                None
+            };
         } else if plan.sessions {
             engine.rescan_sessions();
         } else if !plan.reset {

@@ -283,10 +283,12 @@ fn react_to_changes(hwnd: HWND) {
         let mut st = ctx.shared.settings.lock().unwrap();
         let rule_cmds = rules::rule_cmds(&events, &now, &st.rules);
         let list = st.profiles.clone();
+        let routes = st.app_routes.clone();
         let rules = profiles::Rules {
             remember: st.remember,
             new_app_volume: st.new_app_volume.map(|p| p as f32 / 100.0),
             profiles: &list,
+            routes: &routes,
         };
         let mut mem = std::mem::take(&mut st.memory);
         let (cmds, dirty, profile) = profiles::react(&events, &now, &rules, &mut mem);

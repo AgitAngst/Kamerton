@@ -480,8 +480,10 @@ impl Engine {
         Ok(e)
     }
 
-    /// Перечитать список устройств; у прежних устройств подписки остаются.
-    pub fn rescan_devices(&mut self) {
+    /// Перечитать список устройств; у прежних устройств подписки остаются. `true` — какое-то активное
+    /// устройство не открылось (только что включено, Windows ещё не готова): список надо перечитать позже.
+    pub fn rescan_devices(&mut self) -> bool {
+        let mut incomplete = false;
         let mut old = std::mem::take(&mut self.devices);
         let mut opened = Vec::new();
         for (edf, flow) in [(eRender, Flow::Render), (eCapture, Flow::Capture)] {
@@ -491,12 +493,19 @@ impl Engine {
                 .ok()
                 .and_then(|d| device_id(&d).ok());
             let Ok(list) = (unsafe { self.enumerator.EnumAudioEndpoints(edf, DEVICE_STATE_ACTIVE) }) else {
+                incomplete = true;
                 continue;
             };
             let count = unsafe { list.GetCount() }.unwrap_or(0);
             for i in 0..count {
-                let Ok(dev) = (unsafe { list.Item(i) }) else { continue };
-                let Ok(id) = device_id(&dev) else { continue };
+                let Ok(dev) = (unsafe { list.Item(i) }) else {
+                    incomplete = true;
+                    continue;
+                };
+                let Ok(id) = device_id(&dev) else {
+                    incomplete = true;
+                    continue;
+                };
                 let mut handle = match old.iter().position(|h| h.info.id == id) {
                     Some(p) => old.swap_remove(p),
                     None => match DeviceHandle::open(&dev, id.clone(), flow, &self.tx) {
@@ -504,7 +513,10 @@ impl Engine {
                             opened.push(self.devices.len());
                             h
                         }
-                        Err(_) => continue,
+                        Err(_) => {
+                            incomplete = true;
+                            continue;
+                        }
                     },
                 };
                 handle.info.name = device_name(&dev).unwrap_or_default();
@@ -523,6 +535,7 @@ impl Engine {
             }
         }
         self.forget_dead_procs();
+        incomplete
     }
 
     /// Живы ли объекты Core Audio: перечислитель и громкость каждого устройства отвечают.

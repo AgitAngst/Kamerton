@@ -110,6 +110,8 @@ pub struct Rules<'a> {
     /// Громкость новых программ, 0..1.
     pub new_app_volume: Option<f32>,
     pub profiles: &'a [Profile],
+    /// Устройство, за которым закреплена программа (по exe).
+    pub routes: &'a std::collections::BTreeMap<String, String>,
 }
 
 /// Реакция на события ядра: команды, обновлённая память (`true` — её надо сохранить) и профиль, который
@@ -122,29 +124,39 @@ pub fn react(events: &[Event], s: &Snapshot, rules: &Rules, memory: &mut Memory)
     let mut profile = None;
     for e in events {
         match e {
-            Event::AppAdded(a) if render(&a.key) && real_app(&a.key.exe) => match memory.get(&a.key.exe) {
-                Some(&(vol, muted)) if rules.remember => {
-                    if (a.volume - vol).abs() > 0.005 {
-                        cmds.push(Cmd::SetVolume(a.key.clone(), vol));
-                    }
-                    if a.muted != muted {
-                        cmds.push(Cmd::SetMuted(a.key.clone(), muted));
-                    }
+            Event::AppAdded(a) if render(&a.key) && real_app(&a.key.exe) => {
+                // Закрепление Windows живёт, пока жив процесс: новую программу ставим на её устройство.
+                if a.pinned.is_none()
+                    && let Some(dev) = rules.routes.get(&a.key.exe)
+                    && *dev != a.key.device
+                    && s.devices.iter().any(|d| d.id == *dev && d.flow == Flow::Render)
+                {
+                    cmds.push(Cmd::Move(a.key.clone(), Some(dev.clone())));
                 }
-                None => {
-                    if let Some(v) = rules.new_app_volume {
-                        cmds.push(Cmd::SetVolume(a.key.clone(), v));
-                        if rules.remember {
-                            memory.insert(a.key.exe.clone(), (v, a.muted));
+                match memory.get(&a.key.exe) {
+                    Some(&(vol, muted)) if rules.remember => {
+                        if (a.volume - vol).abs() > 0.005 {
+                            cmds.push(Cmd::SetVolume(a.key.clone(), vol));
+                        }
+                        if a.muted != muted {
+                            cmds.push(Cmd::SetMuted(a.key.clone(), muted));
+                        }
+                    }
+                    None => {
+                        if let Some(v) = rules.new_app_volume {
+                            cmds.push(Cmd::SetVolume(a.key.clone(), v));
+                            if rules.remember {
+                                memory.insert(a.key.exe.clone(), (v, a.muted));
+                                dirty = true;
+                            }
+                        } else if rules.remember {
+                            memory.insert(a.key.exe.clone(), (a.volume, a.muted));
                             dirty = true;
                         }
-                    } else if rules.remember {
-                        memory.insert(a.key.exe.clone(), (a.volume, a.muted));
-                        dirty = true;
                     }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Event::AppChanged(a) if rules.remember && render(&a.key) && real_app(&a.key.exe) => {
                 let now = (model::step(a.volume, 0.0), a.muted);
                 if memory.get(&a.key.exe) != Some(&now) {
@@ -242,8 +254,9 @@ mod tests {
 
     #[test]
     fn remembered_volume_returns() {
+        let none = std::collections::BTreeMap::new();
         let mut mem = Memory::from([("player.exe".to_string(), (0.3, false))]);
-        let rules = Rules { remember: true, new_app_volume: None, profiles: &[] };
+        let rules = Rules { remember: true, new_app_volume: None, profiles: &[], routes: &none };
         let a = app("spk", "player.exe", 1.0);
         let (cmds, dirty, _) = react(&[Event::AppAdded(a.clone())], &snap(), &rules, &mut mem);
         assert_eq!(cmds, vec![Cmd::SetVolume(a.key, 0.3)]);
@@ -252,8 +265,9 @@ mod tests {
 
     #[test]
     fn new_app_gets_default_and_is_remembered() {
+        let none = std::collections::BTreeMap::new();
         let mut mem = Memory::new();
-        let rules = Rules { remember: true, new_app_volume: Some(0.5), profiles: &[] };
+        let rules = Rules { remember: true, new_app_volume: Some(0.5), profiles: &[], routes: &none };
         let a = app("spk", "new.exe", 1.0);
         let (cmds, dirty, _) = react(&[Event::AppAdded(a.clone())], &snap(), &rules, &mut mem);
         assert_eq!(cmds, vec![Cmd::SetVolume(a.key, 0.5)]);
@@ -263,9 +277,10 @@ mod tests {
 
     #[test]
     fn changes_are_remembered_only_when_on() {
+        let none = std::collections::BTreeMap::new();
         let mut mem = Memory::new();
         let a = app("spk", "player.exe", 0.25);
-        let off = Rules { remember: false, new_app_volume: None, profiles: &[] };
+        let off = Rules { remember: false, new_app_volume: None, profiles: &[], routes: &none };
         assert!(!react(&[Event::AppChanged(a.clone())], &snap(), &off, &mut mem).1);
         let on = Rules { remember: true, ..off };
         assert!(react(&[Event::AppChanged(a)], &snap(), &on, &mut mem).1);
@@ -274,11 +289,12 @@ mod tests {
 
     #[test]
     fn connect_rule_picks_profile() {
+        let none = std::collections::BTreeMap::new();
         let profiles = vec![
             Profile { name: "A".into(), ..Default::default() },
             Profile { name: "B".into(), on_connect: Some("phones".into()), ..Default::default() },
         ];
-        let rules = Rules { remember: false, new_app_volume: None, profiles: &profiles };
+        let rules = Rules { remember: false, new_app_volume: None, profiles: &profiles, routes: &none };
         let d = dev("phones", Flow::Render, false, vec![]);
         let (_, _, p) = react(&[Event::DeviceAdded(d)], &snap(), &rules, &mut Memory::new());
         assert_eq!(p, Some(1));
@@ -286,10 +302,31 @@ mod tests {
 
     #[test]
     fn recording_apps_are_not_remembered() {
+        let none = std::collections::BTreeMap::new();
         let mut mem = Memory::new();
         let a = app("mic", "rec.exe", 0.5);
-        let rules = Rules { remember: true, new_app_volume: Some(0.9), profiles: &[] };
+        let rules = Rules { remember: true, new_app_volume: Some(0.9), profiles: &[], routes: &none };
         let (cmds, dirty, _) = react(&[Event::AppAdded(a)], &snap(), &rules, &mut mem);
         assert!(cmds.is_empty() && !dirty);
+    }
+
+    #[test]
+    fn remembered_route_returns_after_restart() {
+        let none = std::collections::BTreeMap::new();
+        let routes = std::collections::BTreeMap::from([("player.exe".to_string(), "phones".to_string())]);
+        let rules = Rules { remember: false, new_app_volume: None, profiles: &[], routes: &routes };
+        let a = app("spk", "player.exe", 1.0);
+        let s = snap();
+        let mut gone = snap();
+        gone.devices.retain(|d| d.id != "phones");
+        let (cmds, _, _) = react(&[Event::AppAdded(a.clone())], &s, &rules, &mut Memory::new());
+        assert_eq!(cmds, vec![Cmd::Move(a.key.clone(), Some("phones".into()))]);
+        // Уже закреплена или устройства нет — не трогаем.
+        let mut pinned = a.clone();
+        pinned.pinned = Some("phones".into());
+        assert!(react(&[Event::AppAdded(pinned)], &s, &rules, &mut Memory::new()).0.is_empty());
+        assert!(react(&[Event::AppAdded(a)], &gone, &rules, &mut Memory::new()).0.is_empty());
+        let off = Rules { routes: &none, ..rules };
+        assert!(react(&[Event::AppAdded(app("spk", "player.exe", 1.0))], &s, &off, &mut Memory::new()).0.is_empty());
     }
 }

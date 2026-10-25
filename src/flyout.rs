@@ -2689,12 +2689,12 @@ impl Flyout {
                 ui.add_enabled(false, egui::Button::new(T::RouteUnavailable.get()));
             } else {
                 if check_item(ui, a.pinned.is_none(), T::AsSystem.get()) {
-                    let _ = self.control.move_app(a.key.clone(), None);
+                    self.move_app(a.key.clone(), None);
                     ui.close();
                 }
                 for d in snapshot.devices.iter().filter(|d| d.flow == flow) {
                     if check_item(ui, a.pinned.as_deref() == Some(d.id.as_str()), &d.name) {
-                        let _ = self.control.move_app(a.key.clone(), Some(d.id.clone()));
+                        self.move_app(a.key.clone(), Some(d.id.clone()));
                         ui.close();
                     }
                 }
@@ -2721,6 +2721,20 @@ impl Flyout {
         if open_hotkeys {
             self.page = Page::Hotkeys;
             self.focus_app = Some(a.key.exe.clone());
+        }
+    }
+
+    /// Закрепить программу за устройством (`None` — «как в системе») и запомнить выбор: Windows держит
+    /// закрепление за процессом и забывает его вместе с ним.
+    fn move_app(&self, key: AppKey, to: Option<String>) {
+        let exe = key.exe.clone();
+        if self.control.move_app(key, to.clone()).is_ok() && !exe.starts_with("pid:") {
+            let mut st = self.shared.settings.lock().unwrap();
+            match to {
+                Some(dev) => st.app_routes.insert(exe, dev),
+                None => st.app_routes.remove(&exe),
+            };
+            st.save();
         }
     }
 
@@ -2753,7 +2767,7 @@ impl Flyout {
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);
             if let Some(to) = over {
-                let _ = self.control.move_app(drag.key.clone(), Some(to));
+                self.move_app(drag.key.clone(), Some(to));
             }
         }
     }

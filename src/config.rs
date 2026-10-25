@@ -95,6 +95,10 @@ pub struct Settings {
     pub new_app_volume: Option<u8>,
     /// Память громкости: строки `appvol=<exe>|<проценты>|<0|1>`.
     pub memory: Memory,
+    /// Устройство, за которым владелец закрепил программу: строки `approute=<exe>|<id устройства>`.
+    /// Windows держит закрепление за процессом, а не за программой, — после перезапуска программы
+    /// Kamerton ставит его заново.
+    pub app_routes: BTreeMap<String, String>,
     /// Профили: `profile.<N>.name|output|input|on_connect=…`, `profile.<N>.app=<exe>|<проценты>|<0|1>|<устройство или ->`.
     pub profiles: Vec<Profile>,
     /// Проверять обновления при запуске и раз в сутки: `updates=1`.
@@ -142,6 +146,7 @@ impl Default for Settings {
             prerelease: false,
             skip_version: None,
             memory: Memory::new(),
+            app_routes: BTreeMap::new(),
             profiles: Vec::new(),
             other: Vec::new(),
         }
@@ -258,6 +263,13 @@ impl Settings {
                     && !exe.is_empty()
                 {
                     s.memory.insert(exe.to_lowercase(), (vol, muted == "1"));
+                }
+            } else if k == "approute" {
+                if let Some((exe, dev)) = v.split_once('|')
+                    && !exe.is_empty()
+                    && !dev.is_empty()
+                {
+                    s.app_routes.insert(exe.to_lowercase(), dev.to_string());
                 }
             } else if k == "limit_device" {
                 s.limit_device = cap(v);
@@ -455,6 +467,9 @@ impl Settings {
         }
         for (exe, (vol, muted)) in &self.memory {
             out.push_str(&format!("appvol={}|{}|{}\n", exe, pct(*vol), if *muted { 1 } else { 0 }));
+        }
+        for (exe, dev) in &self.app_routes {
+            out.push_str(&format!("approute={exe}|{dev}\n"));
         }
         for (n, p) in self.profiles.iter().enumerate() {
             out.push_str(&format!("profile.{n}.name={}\n", p.name));

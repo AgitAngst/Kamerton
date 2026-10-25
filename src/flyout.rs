@@ -1399,6 +1399,13 @@ impl Flyout {
             ui.label(egui::RichText::new(T::Settings.get()).font(anvil_ui::semibold(14.5)));
         });
         ui.add_space(6.0);
+        let mut st = self.shared.settings.lock().unwrap().clone();
+        let before = st.clone();
+        // Шапка: знак, версия и проверка обновления. При поиске остаётся, если подходит («версия», «обновления»).
+        if settings_search::shown(&self.search, Item::About) {
+            self.about_card(ui, &mut st);
+            ui.add_space(6.0);
+        }
         // Поиск по строкам страницы; Esc очищает запрос, а не закрывает окно (см. `ui`).
         if !self.search.is_empty() && ui.input(|i| i.key_pressed(Key::Escape)) {
             self.search.clear();
@@ -1411,8 +1418,6 @@ impl Flyout {
         ui.add_space(6.0);
         let query = self.search.clone();
         let show = |i: Item| settings_search::shown(&query, i);
-        let mut st = self.shared.settings.lock().unwrap().clone();
-        let before = st.clone();
 
         // Переходы на другие страницы — первыми, строками со стрелкой, а не кнопками внутри раздела.
         let [hotkeys, profiles, rules] = nav_rows(ui, [show(Item::Hotkeys), show(Item::Profiles), show(Item::Rules)]);
@@ -1510,13 +1515,21 @@ impl Flyout {
             anvil_ui::widgets::switch(ui, &mut st.mixer_on_top, T::MixerOnTop.get());
         }
 
-        if show(Item::Autostart) {
+        if settings_search::any(&query, &[Item::Autostart, Item::CheckUpdates, Item::Prerelease]) {
             ui.add_space(10.0);
             anvil_ui::widgets::section_label(ui, T::ThemeSystem.get());
+        }
+        if show(Item::Autostart) {
             let mut auto = sys::autostart();
             if anvil_ui::widgets::switch(ui, &mut auto, T::Autostart.get()).changed() {
                 sys::set_autostart(auto);
             }
+        }
+        if show(Item::CheckUpdates) {
+            anvil_ui::widgets::switch(ui, &mut st.check_updates, T::CheckUpdates.get());
+        }
+        if show(Item::Prerelease) {
+            anvil_ui::widgets::switch(ui, &mut st.prerelease, T::Prerelease.get());
         }
 
         if show(Item::Hidden) {
@@ -1560,27 +1573,6 @@ impl Flyout {
             }
             if let Some(d) = show_dev {
                 st.hidden_devices.remove(&d);
-            }
-        }
-
-        if show(Item::About) {
-            ui.add_space(10.0);
-            anvil_ui::widgets::section_label(ui, T::About.get());
-            // Знак 56 слева; версия и «переносная копия» — разными строками: в одну по-русски не помещаются.
-            let color = st.tray_color;
-            ui.horizontal(|ui| {
-                self.about_mark(ui, color);
-                ui.add_space(6.0);
-                ui.vertical(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
-                    if crate::config::portable_dir().is_some() {
-                        anvil_ui::widgets::note(ui, T::Portable.get());
-                    }
-                });
-            });
-            if let Some(u) = crate::update::get() {
-                self.update_block(ui, u, &mut st);
             }
         }
 
@@ -1651,19 +1643,86 @@ impl Flyout {
         self.had_focus = focused;
     }
 
-    /// «О программе»: состояние обновления, кнопка по состоянию, выключатели.
-    fn update_block(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
+    /// Шапка «Настроек»: знак и версия слева, проверка обновления справа — состояние строкой и одна кнопка (или две)
+    /// по состоянию. Знак цветом из «Значка → Цвет»; под ними — «Переносная копия», если это она.
+    fn about_card(&mut self, ui: &mut Ui, st: &mut Settings) {
+        let p = crate::contrast::palette(ui.ctx());
+        let color = st.tray_color;
+        egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(radius::CARD).inner_margin(12.0).show(
+            ui,
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    self.about_mark(ui, color);
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(19.0);
+                        ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
+                    });
+                    if let Some(u) = crate::update::get() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                                self.update_control(ui, u, st);
+                            });
+                        });
+                    }
+                });
+                if crate::config::portable_dir().is_some() {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(T::Portable.get()).size(11.5).color(p.faint));
+                }
+            },
+        );
+    }
+
+    /// Справа в шапке: строка состояния обновления и кнопки по состоянию.
+    fn update_control(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
         use anvil_update::State;
-        let ctx = ui.ctx().clone();
-        let state = u.state();
-        if let Some(line) = anvil_update::ui::about_status(&ctx, u) {
-            anvil_ui::widgets::note(ui, line);
+        let p = crate::contrast::palette(ui.ctx());
+        let state = crate::update::view_state(u);
+        let status = |ui: &mut Ui, icon: Option<anvil_ui::Icon>, tint: Color32, text: String, strong: bool| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                // Колонка выровнена вправо, и `horizontal` в ней идёт справа налево: сначала текст, левее него — значок.
+                ui.label(egui::RichText::new(text).size(12.5).color(if strong { p.text } else { p.weak }));
+                if let Some(icon) = icon {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    anvil_ui::icons::paint(ui.painter(), r, icon, tint);
+                }
+            });
+        };
+        match &state {
+            State::Idle => {}
+            State::UpToDate => status(ui, Some(anvil_ui::Icon::Check), p.success, T::UpdUpToDate.get().into(), false),
+            State::Checking => status(ui, None, p.weak, T::UpdChecking.get().into(), false),
+            State::Available(up) => status(
+                ui,
+                Some(anvil_ui::Icon::Download),
+                p.accent_text,
+                format!("{} {}", T::UpdAvailable.get(), up.version),
+                true,
+            ),
+            State::Downloading { update, done, total } => {
+                let pct = if *total > 0 { (*done as f64 / *total as f64 * 100.0).round() as u32 } else { 0 };
+                status(ui, None, p.weak, format!("{} {} · {pct} %", T::UpdDownloading.get(), update.version), true);
+                anvil_ui::widgets::progress(ui, (*total > 0).then(|| *done as f32 / *total as f32), 120.0);
+            }
+            State::Ready { update, .. } => status(
+                ui,
+                Some(anvil_ui::Icon::Check),
+                p.success,
+                format!("{} {}", T::UpdReady.get(), update.version),
+                true,
+            ),
+            State::Failed { error, .. } => {
+                status(ui, Some(anvil_ui::Icon::Close), p.danger, T::UpdFailed.get().into(), false);
+                ui.add(egui::Label::new(egui::RichText::new(error).size(11.5).color(p.faint)).truncate());
+            }
         }
-        if let State::Downloading { done, total, .. } = &state {
-            anvil_ui::widgets::progress(ui, (*total > 0).then(|| *done as f32 / *total as f32), 180.0);
-        }
+        ui.add_space(2.0);
         ui.horizontal(|ui| match &state {
             State::Available(up) if up.asset.is_some() => {
+                // Справа налево: «Обновить» крайняя, «Пропустить» левее.
                 if anvil_ui::widgets::button(
                     ui,
                     anvil_ui::Kind::Primary,
@@ -1704,7 +1763,18 @@ impl Flyout {
                     u.install();
                 }
             }
-            State::Checking | State::Downloading { .. } => {}
+            State::Downloading { .. } => {}
+            State::Checking => {
+                // Кнопка на месте, но недоступна: раскладка не прыгает, пока идёт проверка.
+                ui.add_enabled_ui(false, |ui| {
+                    anvil_ui::widgets::button(
+                        ui,
+                        anvil_ui::Kind::Secondary,
+                        Some(anvil_ui::Icon::Refresh),
+                        T::CheckNow.get(),
+                    );
+                });
+            }
             _ => {
                 if anvil_ui::widgets::button(
                     ui,
@@ -1718,8 +1788,6 @@ impl Flyout {
                 }
             }
         });
-        anvil_ui::widgets::switch(ui, &mut st.check_updates, T::CheckUpdates.get());
-        anvil_ui::widgets::switch(ui, &mut st.prerelease, T::Prerelease.get());
     }
 
     fn profiles_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {

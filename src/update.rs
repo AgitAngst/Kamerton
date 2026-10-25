@@ -74,3 +74,25 @@ pub fn restart(tray: isize) -> Result<(), String> {
     crate::sys::post_close(tray);
     Ok(())
 }
+
+/// Состояние для вида. Обычно настоящее; со `KAMERTON_UPDATE_DEMO=uptodate|checking|available|downloading|ready|failed` —
+/// выдуманное: так снимаются все состояния шапки «Настроек», не трогая GitHub.
+pub fn view_state(u: &Updater) -> State {
+    let Ok(name) = std::env::var("KAMERTON_UPDATE_DEMO") else { return u.state() };
+    let update = || anvil_update::Update {
+        version: anvil_update::Version::parse("1.4.0").expect("version"),
+        tag: "v1.4.0".into(),
+        notes: String::new(),
+        page: String::new(),
+        asset: Some(anvil_update::Asset { name: "kamerton-1.4.0-windows-x64.zip".into(), url: String::new(), size: 1 }),
+        sums: None,
+    };
+    match name.as_str() {
+        "checking" => State::Checking,
+        "available" => State::Available(update()),
+        "downloading" => State::Downloading { update: update(), done: 62, total: 100 },
+        "ready" => State::Ready { update: update(), exe: std::path::PathBuf::new() },
+        "failed" => State::Failed { update: None, error: "GitHub: HTTP 403".into() },
+        _ => State::UpToDate,
+    }
+}

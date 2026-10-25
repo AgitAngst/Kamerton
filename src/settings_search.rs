@@ -20,12 +20,14 @@ pub enum Item {
     Osd,
     MixerOnTop,
     Autostart,
+    CheckUpdates,
+    Prerelease,
     Hidden,
     About,
 }
 
 /// Все строки страницы по порядку.
-pub const ALL: [Item; 15] = [
+pub const ALL: [Item; 17] = [
     Item::Hotkeys,
     Item::Profiles,
     Item::Rules,
@@ -39,6 +41,8 @@ pub const ALL: [Item; 15] = [
     Item::Osd,
     Item::MixerOnTop,
     Item::Autostart,
+    Item::CheckUpdates,
+    Item::Prerelease,
     Item::Hidden,
     Item::About,
 ];
@@ -82,11 +86,15 @@ fn words(item: Item) -> (&'static [T], &'static [&'static str]) {
         Item::Autostart => {
             (&[T::Autostart, T::ThemeSystem], &["автозапуск", "startup", "autostart", "boot", "windows"])
         }
-        Item::Hidden => (&[T::Hidden, T::NothingHidden], &["скрыть", "hide", "hidden"]),
-        Item::About => (
-            &[T::About],
-            &["версия", "version", "обновления", "updates", "update", "kamerton", "пред-выпуски", "pre-release"],
+        Item::CheckUpdates => (&[T::CheckUpdates, T::ThemeSystem], &["обновления", "updates", "update"]),
+        Item::Prerelease => (
+            &[T::Prerelease, T::ThemeSystem],
+            &["обновления", "updates", "update", "пред-выпуски", "pre-release", "beta"],
         ),
+        Item::Hidden => (&[T::Hidden, T::NothingHidden], &["скрыть", "hide", "hidden"]),
+        Item::About => {
+            (&[T::About], &["версия", "version", "обновления", "updates", "update", "kamerton", "проверить", "check"])
+        }
     }
 }
 
@@ -175,5 +183,10 @@ mod tests {
     fn about_finds_updates() {
         assert!(found("обновления").contains(&Item::About));
         assert!(found("updates").contains(&Item::About));
+        for q in ["обновления", "updates"] {
+            let f = found(q);
+            assert!(f.contains(&Item::CheckUpdates) && f.contains(&Item::Prerelease), "{q}");
+        }
+        assert_eq!(found("pre-release"), vec![Item::Prerelease]);
     }
 }

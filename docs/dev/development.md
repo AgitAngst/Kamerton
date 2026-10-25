@@ -40,6 +40,7 @@ python E:/dev_personal/tools/checks.py --repo . --logs E:/dev_personal/kamerton-
 | `KAMERTON_SNAP=<файл.png>` | окно через 10 кадров после открытия сохраняет свой снимок и закрывается |
 | `KAMERTON_EXPANDED=0\|1` | вид окна (свёрнуто / развёрнуто) для снимков; `settings.txt` не меняется |
 | `KAMERTON_PAGE=hotkeys\|profiles\|settings` | окно `--flyout` сразу на странице настроек |
+| `KAMERTON_UPDATE_DEMO=uptodate\|checking\|available\|downloading\|ready\|failed` | шапка «Настроек» показывает выдуманное состояние обновления (снимки), GitHub не трогается |
 | `KAMERTON_PAGE=osd` с `KAMERTON_OSD=<проценты>[m]` | окно `--flyout` сразу плашкой громкости (`m` — «без звука»), держится час; со `KAMERTON_SNAP` — снимок плашки |
 | `KAMERTON_OSD_DEMO=1` | трей через 2 с и ещё раз через 0,8 с показывает плашку с нынешней громкостью устройства по умолчанию, ничего не меняя — живая проверка плашки |
 | `KAMERTON_SEARCH=<запрос>` | с `KAMERTON_PAGE=settings` — страница «Настройки» с запросом в поиске |

@@ -111,6 +111,12 @@ pub enum T {
     SkipVersion,
     RestartNow,
     Retry,
+    UpdUpToDate,
+    UpdChecking,
+    UpdAvailable,
+    UpdDownloading,
+    UpdReady,
+    UpdFailed,
     MenuUpdate,
     MenuRestart,
 
@@ -180,7 +186,7 @@ pub enum T {
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 138] = [
+    pub const ALL: [T; 144] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -257,6 +263,12 @@ impl T {
         T::SkipVersion,
         T::RestartNow,
         T::Retry,
+        T::UpdUpToDate,
+        T::UpdChecking,
+        T::UpdAvailable,
+        T::UpdDownloading,
+        T::UpdReady,
+        T::UpdFailed,
         T::MenuUpdate,
         T::MenuRestart,
         T::Hidden,
@@ -407,6 +419,12 @@ impl T {
             T::SkipVersion => ("Пропустить", "Skip"),
             T::RestartNow => ("Перезапустить", "Restart"),
             T::Retry => ("Повторить", "Retry"),
+            T::UpdUpToDate => ("Последняя версия", "Up to date"),
+            T::UpdChecking => ("Проверка…", "Checking…"),
+            T::UpdAvailable => ("Доступна", "Available"),
+            T::UpdDownloading => ("Загрузка", "Downloading"),
+            T::UpdReady => ("Скачана", "Downloaded"),
+            T::UpdFailed => ("Не удалось проверить", "Check failed"),
             T::MenuUpdate => ("Обновить до", "Update to"),
             T::MenuRestart => ("Перезапустить на", "Restart into"),
 

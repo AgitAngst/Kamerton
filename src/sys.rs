@@ -3,7 +3,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, CreateRoundRectRgn, DIB_RGB_COLORS,
@@ -30,10 +32,26 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Мьютекс получен нами первыми? Иначе свой дескриптор закрыть: пока он открыт, мьютекс жив даже после
+/// выхода прежнего владельца, и «Перезапустить» после обновления не получал его никогда.
+fn claimed(h: HANDLE) -> Option<HANDLE> {
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        let _ = unsafe { CloseHandle(h) };
+        None
+    } else {
+        Some(h)
+    }
+}
+
+/// Занять именованный мьютекс. `None` — он уже у другого экземпляра.
+fn claim(name: PCWSTR) -> Option<HANDLE> {
+    let h = unsafe { CreateMutexW(None, true, name) }.ok()?;
+    claimed(h)
+}
+
 /// Захватить «Kamerton уже запущен». `None` — уже запущен другой экземпляр. Дескриптор держать до выхода.
 pub fn single_instance() -> Option<HANDLE> {
-    let h = unsafe { CreateMutexW(None, true, w!("Local\\Kamerton")) }.ok()?;
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS { None } else { Some(h) }
+    claim(w!("Local\\Kamerton"))
 }
 
 /// Release-сборка — без своей консоли: для консольных ключей подключаемся к консоли родителя.
@@ -256,8 +274,7 @@ pub fn raise_window(title: &str) -> bool {
 
 /// Захватить «окно микшера уже открыто». `None` — уже открыто.
 pub fn single_mixer() -> Option<HANDLE> {
-    let h = unsafe { CreateMutexW(None, true, w!("Local\\KamertonMixer")) }.ok()?;
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS { None } else { Some(h) }
+    claim(w!("Local\\KamertonMixer"))
 }
 
 /// Разрешить процессу окна взять фокус: щелчок пришёл трею, а окно — другой процесс.
@@ -367,5 +384,16 @@ mod tests {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(icon);
         }
+    }
+
+    // Дескриптор проигравшего закрывается: иначе мьютекс не освободится и после выхода владельца.
+    #[test]
+    fn mutex_is_free_again_after_the_owner_closes_it() {
+        let name = w!("Local\\KamertonTestClaim");
+        let first = claim(name).expect("first claim");
+        assert!(claim(name).is_none(), "second claim must lose");
+        unsafe { CloseHandle(first) }.unwrap();
+        let again = claim(name).expect("claim after the owner is gone");
+        unsafe { CloseHandle(again) }.unwrap();
     }
 }

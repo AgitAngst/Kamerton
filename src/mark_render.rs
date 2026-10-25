@@ -23,6 +23,12 @@ impl IconColor {
         }
     }
 
+    /// Образец цвета для «Настроек»: середина градиента плитки.
+    pub fn swatch(self) -> [u8; 3] {
+        let (a, b) = self.tile();
+        [0, 1, 2].map(|i| ((a[i] + b[i]) / 2.0).round() as u8)
+    }
+
     /// Колонка: акцентный текст под тёмную или светлую панель задач (контраст с панелью ≥ 4,5:1).
     fn speaker(self, dark_taskbar: bool) -> [f32; 3] {
         match (self, dark_taskbar) {

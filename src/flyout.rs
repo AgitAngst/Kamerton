@@ -1472,19 +1472,26 @@ impl Flyout {
         }
         if show(Item::TrayIcon) {
             anvil_ui::chrome::setting_row(ui, T::InTray.get(), |ui| {
-                segmented_even(
+                let tint = st.tray_color;
+                segmented_glyphs(
                     ui,
                     &mut st.tray_icon,
-                    &[(TrayIcon::Mark, None, T::TrayMark.get()), (TrayIcon::Speaker, None, T::TraySpeaker.get())],
+                    &[
+                        (TrayIcon::Mark, Glyph::Tray(TrayIcon::Mark, tint), T::TrayMark.get()),
+                        (TrayIcon::Speaker, Glyph::Tray(TrayIcon::Speaker, tint), T::TraySpeaker.get()),
+                    ],
                 );
             });
         }
         if show(Item::IconColor) {
             anvil_ui::chrome::setting_row(ui, T::IconColor.get(), |ui| {
-                segmented_even(
+                segmented_glyphs(
                     ui,
                     &mut st.tray_color,
-                    &[(IconColor::Purple, None, T::ColorPurple.get()), (IconColor::Azure, None, T::ColorAzure.get())],
+                    &[
+                        (IconColor::Purple, Glyph::Dot(IconColor::Purple), T::ColorPurple.get()),
+                        (IconColor::Azure, Glyph::Dot(IconColor::Azure), T::ColorAzure.get()),
+                    ],
                 );
             });
         }
@@ -1643,71 +1650,90 @@ impl Flyout {
         self.had_focus = focused;
     }
 
-    /// Шапка «Настроек»: знак и версия слева, проверка обновления справа — состояние строкой и одна кнопка (или две)
-    /// по состоянию. Знак цветом из «Значка → Цвет»; под ними — «Переносная копия», если это она.
+    /// Шапка «Настроек» (вариант A макета): сверху знак, «Kamerton» и версия, ниже — полоса обновления: слева
+    /// состояние, справа кнопки по состоянию. Под версией — «Переносная копия», если это она.
     fn about_card(&mut self, ui: &mut Ui, st: &mut Settings) {
         let p = crate::contrast::palette(ui.ctx());
         let color = st.tray_color;
-        egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(radius::CARD).inner_margin(12.0).show(
-            ui,
-            |ui| {
+        egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(radius::CARD).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 14, top: 14, bottom: 12 }).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     self.about_mark(ui, color);
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.add_space(19.0);
-                        ui.label(egui::RichText::new(format!("Kamerton {}", env!("CARGO_PKG_VERSION"))).size(13.5));
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(egui::RichText::new("Kamerton").font(anvil_ui::semibold(16.0)));
+                        let version = format!("{} {}", T::Version.get(), env!("CARGO_PKG_VERSION"));
+                        ui.label(egui::RichText::new(version).size(12.5).color(p.weak));
+                        if crate::config::portable_dir().is_some() {
+                            ui.label(egui::RichText::new(T::Portable.get()).size(11.5).color(p.faint));
+                        }
                     });
-                    if let Some(u) = crate::update::get() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                                self.update_control(ui, u, st);
-                            });
-                        });
-                    }
                 });
-                if crate::config::portable_dir().is_some() {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(T::Portable.get()).size(11.5).color(p.faint));
-                }
-            },
-        );
+            });
+            if let Some(u) = crate::update::get() {
+                let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+                ui.painter().rect_filled(line, 0, p.border);
+                let bottom = CornerRadius { nw: 0, ne: 0, sw: radius::CARD - 1, se: radius::CARD - 1 };
+                egui::Frame::new()
+                    .fill(p.surface)
+                    .corner_radius(bottom)
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.update_strip(ui, u, st);
+                    });
+            }
+        });
     }
 
-    /// Справа в шапке: строка состояния обновления и кнопки по состоянию.
-    fn update_control(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
+    /// Полоса обновления: состояние слева, кнопки справа.
+    fn update_strip(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
+        let state = crate::update::view_state(u);
+        let left_w = (ui.available_width() - 220.0).max(140.0);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(left_w);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                Self::update_status(ui, &state);
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.update_buttons(ui, u, st, &state);
+            });
+        });
+    }
+
+    /// Строка состояния обновления: значок и текст; под ней ошибка или полоса загрузки.
+    fn update_status(ui: &mut Ui, state: &anvil_update::State) {
         use anvil_update::State;
         let p = crate::contrast::palette(ui.ctx());
-        let state = crate::update::view_state(u);
-        let status = |ui: &mut Ui, icon: Option<anvil_ui::Icon>, tint: Color32, text: String, strong: bool| {
+        let line = |ui: &mut Ui, icon: Option<anvil_ui::Icon>, tint: Color32, text: String, strong: bool| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                // Колонка выровнена вправо, и `horizontal` в ней идёт справа налево: сначала текст, левее него — значок.
-                ui.label(egui::RichText::new(text).size(12.5).color(if strong { p.text } else { p.weak }));
                 if let Some(icon) = icon {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                     anvil_ui::icons::paint(ui.painter(), r, icon, tint);
                 }
+                ui.label(egui::RichText::new(text).size(12.5).color(if strong { p.text } else { p.weak }));
             });
         };
-        match &state {
+        match state {
             State::Idle => {}
-            State::UpToDate => status(ui, Some(anvil_ui::Icon::Check), p.success, T::UpdUpToDate.get().into(), false),
-            State::Checking => status(ui, None, p.weak, T::UpdChecking.get().into(), false),
-            State::Available(up) => status(
-                ui,
-                Some(anvil_ui::Icon::Download),
-                p.accent_text,
-                format!("{} {}", T::UpdAvailable.get(), up.version),
-                true,
-            ),
+            State::UpToDate => line(ui, Some(anvil_ui::Icon::Check), p.success, T::UpdUpToDate.get().into(), false),
+            State::Checking => line(ui, None, p.weak, T::UpdChecking.get().into(), false),
+            // Без значка: у «Обновить» он уже есть, а в узкой полосе по-русски («Пропустить») места не хватает.
+            State::Available(up) => {
+                line(ui, None, p.accent_text, format!("{} {}", T::UpdAvailable.get(), up.version), true)
+            }
             State::Downloading { update, done, total } => {
                 let pct = if *total > 0 { (*done as f64 / *total as f64 * 100.0).round() as u32 } else { 0 };
-                status(ui, None, p.weak, format!("{} {} · {pct} %", T::UpdDownloading.get(), update.version), true);
-                anvil_ui::widgets::progress(ui, (*total > 0).then(|| *done as f32 / *total as f32), 120.0);
+                line(ui, None, p.weak, format!("{} {} · {pct} %", T::UpdDownloading.get(), update.version), true);
+                anvil_ui::widgets::progress(ui, (*total > 0).then(|| *done as f32 / *total as f32), 150.0);
             }
-            State::Ready { update, .. } => status(
+            State::Ready { update, .. } => line(
                 ui,
                 Some(anvil_ui::Icon::Check),
                 p.success,
@@ -1715,14 +1741,26 @@ impl Flyout {
                 true,
             ),
             State::Failed { error, .. } => {
-                status(ui, Some(anvil_ui::Icon::Close), p.danger, T::UpdFailed.get().into(), false);
-                ui.add(egui::Label::new(egui::RichText::new(error).size(11.5).color(p.faint)).truncate());
+                line(ui, Some(anvil_ui::Icon::Close), p.danger, T::UpdFailed.get().into(), false);
+                ui.horizontal(|ui| {
+                    ui.add_space(22.0);
+                    ui.add(egui::Label::new(egui::RichText::new(error).size(11.5).color(p.faint)).truncate());
+                });
             }
         }
-        ui.add_space(2.0);
-        ui.horizontal(|ui| match &state {
+    }
+
+    /// Кнопки по состоянию. Колонка идёт справа налево: первой кладётся крайняя справа («Обновить», потом «Пропустить»).
+    fn update_buttons(
+        &mut self,
+        ui: &mut Ui,
+        u: &anvil_update::Updater,
+        st: &mut Settings,
+        state: &anvil_update::State,
+    ) {
+        use anvil_update::State;
+        match state {
             State::Available(up) if up.asset.is_some() => {
-                // Справа налево: «Обновить» крайняя, «Пропустить» левее.
                 if anvil_ui::widgets::button(
                     ui,
                     anvil_ui::Kind::Primary,
@@ -1787,7 +1825,7 @@ impl Flyout {
                     crate::update::check_now(st);
                 }
             }
-        });
+        }
     }
 
     fn profiles_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
@@ -2350,9 +2388,45 @@ fn nav_rows(ui: &mut Ui, show: [bool; 3]) -> [bool; 3] {
     clicked
 }
 
+/// Значок в сегменте: системный значок набора, образец значка в трее (в цвете, как будет) или точка цвета.
+#[derive(Clone, Copy)]
+enum Glyph {
+    None,
+    Icon(anvil_ui::Icon),
+    Tray(TrayIcon, IconColor),
+    Dot(IconColor),
+}
+
+/// Текстура значка в трее для сегмента, `px` пикселей: рисуется тем же растеризатором, что и трей; хранится в памяти egui.
+fn tray_glyph(ctx: &egui::Context, kind: TrayIcon, color: IconColor, dark: bool, px: u32) -> TextureHandle {
+    let name = format!("kamerton-seg-{kind:?}-{color:?}-{dark}-{px}");
+    let id = egui::Id::new(&name);
+    if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
+        return t;
+    }
+    let rgba = match kind {
+        TrayIcon::Mark => mark_render::mark(&mark_render::rest(px), px, color),
+        TrayIcon::Speaker => {
+            let frame = mark::SpeakerFrame { waves: [1.0; 3], cross: 0.0, thump: 1.0, ripple: None, error: false };
+            mark_render::speaker(&frame, px, dark, color)
+        }
+    };
+    let image = egui::ColorImage::from_rgba_unmultiplied([px as usize, px as usize], &rgba);
+    let texture = ctx.load_texture(name, image, TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    texture
+}
+
 /// Переключатель из равных сегментов ширины `SEGMENTED_W`: «Тема» и «Язык» стоят одной колонкой. Как
 /// `segmented` набора, только ширина сегмента не зависит от подписи.
 fn segmented_even<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, options: &[(V, Option<anvil_ui::Icon>, &str)]) {
+    let options: Vec<(V, Glyph, &str)> =
+        options.iter().map(|(v, icon, text)| (*v, icon.map_or(Glyph::None, Glyph::Icon), *text)).collect();
+    segmented_glyphs(ui, value, &options);
+}
+
+/// То же, но со значком любого вида (`Glyph`): «В трее» и «Цвет» показывают, что выбираешь.
+fn segmented_glyphs<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, options: &[(V, Glyph, &str)]) {
     let p = crate::contrast::palette(ui.ctx());
     let font = FontId::proportional(13.0);
     let (rect, response) = ui.allocate_exact_size(vec2(SEGMENTED_W, 30.0), Sense::hover());
@@ -2368,7 +2442,7 @@ fn segmented_even<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, options: &[(V
         let thumb = Rect::from_min_size(pos2(rect.left() + left, rect.top() + 2.0), vec2(seg_w, 26.0));
         ui.painter().rect(thumb, radius::CONTROL - 1, p.card, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
     }
-    for (i, (option, icon, text)) in options.iter().enumerate() {
+    for (i, (option, glyph, text)) in options.iter().enumerate() {
         let s = seg(i);
         let r = ui.interact(s, response.id.with(i), Sense::click());
         let selected = *value == *option;
@@ -2380,13 +2454,31 @@ fn segmented_even<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, options: &[(V
         }
         let color = if selected { p.text } else { p.weak };
         let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), color);
-        let width = galley.size().x + if icon.is_some() { 21.0 } else { 0.0 };
+        let lead = match glyph {
+            Glyph::None => 0.0,
+            Glyph::Icon(_) | Glyph::Tray(..) => 21.0,
+            Glyph::Dot(_) => 16.0,
+        };
+        let width = galley.size().x + lead;
         let mut x = s.center().x - width / 2.0;
-        if let Some(icon) = icon {
-            let glyph = Rect::from_min_size(pos2(x, s.center().y - 8.0), Vec2::splat(16.0));
-            anvil_ui::icons::paint(ui.painter(), glyph, *icon, color);
-            x += 21.0;
+        match glyph {
+            Glyph::None => {}
+            Glyph::Icon(icon) => {
+                let g = Rect::from_min_size(pos2(x, s.center().y - 8.0), Vec2::splat(16.0));
+                anvil_ui::icons::paint(ui.painter(), g, *icon, color);
+            }
+            Glyph::Tray(kind, tint) => {
+                let g = Rect::from_min_size(pos2(x, s.center().y - 8.0), Vec2::splat(16.0));
+                let px = (16.0 * ui.ctx().pixels_per_point()).round() as u32;
+                let texture = tray_glyph(ui.ctx(), *kind, *tint, ui.visuals().dark_mode, px);
+                ui.painter().image(texture.id(), g, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            Glyph::Dot(tint) => {
+                let [r, g, b] = tint.swatch();
+                ui.painter().circle_filled(pos2(x + 5.0, s.center().y), 5.0, Color32::from_rgb(r, g, b));
+            }
         }
+        x += lead;
         ui.painter().galley(pos2(x, s.center().y - galley.size().y / 2.0), galley, color);
         anvil_ui::widgets::focus_ring(ui, s, &r, radius::CONTROL);
         r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, *text));

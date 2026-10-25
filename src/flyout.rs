@@ -1693,7 +1693,14 @@ impl Flyout {
     /// Полоса обновления: состояние слева, кнопки справа.
     fn update_strip(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
         let state = crate::update::view_state(u);
-        let left_w = (ui.available_width() - 220.0).max(140.0);
+        // Справа кнопки: две («Пропустить», «Обновить») занимают больше всего, одна — меньше.
+        let buttons_w = match &state {
+            anvil_update::State::Available(_) => 225.0,
+            anvil_update::State::Ready { .. } => 190.0,
+            anvil_update::State::Failed { .. } => 130.0,
+            _ => 215.0,
+        };
+        let left_w = (ui.available_width() - buttons_w).max(100.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_max_width(left_w);
@@ -1704,6 +1711,20 @@ impl Flyout {
                 self.update_buttons(ui, u, st, &state);
             });
         });
+        // Ошибка — под строкой, на всю ширину полосы: рядом с кнопкой («Проверить сейчас» по-русски) ей не хватает места.
+        if let anvil_update::State::Failed { error, .. } = &state {
+            let p = crate::contrast::palette(ui.ctx());
+            // Ошибка — понятным текстом на языке окна (лимит GitHub и т. п.); длинную чужую — обрезать.
+            let ru = anvil_ui::lang::language(ui.ctx()) == anvil_ui::Lang::Ru;
+            let mut text = anvil_update::errors::describe(error, ru);
+            if text.chars().count() > 110 {
+                text = text.chars().take(109).collect::<String>() + "…";
+            }
+            ui.horizontal_top(|ui| {
+                ui.add_space(22.0);
+                ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(p.faint)).wrap());
+            });
+        }
     }
 
     /// Строка состояния обновления: значок и текст; под ней ошибка или полоса загрузки.
@@ -1740,12 +1761,8 @@ impl Flyout {
                 format!("{} {}", T::UpdReady.get(), update.version),
                 true,
             ),
-            State::Failed { error, .. } => {
+            State::Failed { .. } => {
                 line(ui, Some(anvil_ui::Icon::Close), p.danger, T::UpdFailed.get().into(), false);
-                ui.horizontal(|ui| {
-                    ui.add_space(22.0);
-                    ui.add(egui::Label::new(egui::RichText::new(error).size(11.5).color(p.faint)).truncate());
-                });
             }
         }
     }
@@ -1789,7 +1806,8 @@ impl Flyout {
                     eprintln!("update: restart failed: {e}");
                 }
             }
-            State::Failed { update: Some(_), .. } => {
+            State::Failed { update, .. } => {
+                // «Повторить»: скачать ещё раз, если было что скачивать, иначе — проверить ещё раз.
                 if anvil_ui::widgets::button(
                     ui,
                     anvil_ui::Kind::Secondary,
@@ -1798,7 +1816,11 @@ impl Flyout {
                 )
                 .clicked()
                 {
-                    u.install();
+                    if update.is_some() {
+                        u.install();
+                    } else {
+                        crate::update::check_now(st);
+                    }
                 }
             }
             State::Downloading { .. } => {}

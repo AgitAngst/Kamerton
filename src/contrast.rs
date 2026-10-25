@@ -2,13 +2,11 @@
 // (фон окна, текст, серый текст, выделение, ссылка), а не палитрой набора. Своих hex в интерфейсе нет:
 // цвета берутся из системы; образцы тем — только для проверки вида (`KAMERTON_CONTRAST=black|white`).
 //
-// Палитра набора (`anvil_ui::Palette::new`) — таблица цветов без способа подменить её из программы, поэтому
-// «свои» части окна берут палитру через `palette`, а виджеты набора получают системные цвета через стиль egui
-// и акцент (`apply`). Полное покрытие виджетов набора — правка набора (подмена палитры в контексте), по команде.
+// С набора 0.9.0 программа подменяет палитру целиком (`anvil_ui::theme::set_palette_override`): виджеты набора и
+// «свои» части окна берут системные цвета из одной палитры (`palette`).
 
-use anvil_ui::theme::Swatch;
-use anvil_ui::{Accent, Palette, ThemeChoice};
-use eframe::egui::{self, Color32, Context, Stroke, Theme};
+use anvil_ui::{Palette, ThemeChoice};
+use eframe::egui::{self, Color32, Context};
 
 /// Цвета системы при включённом высоком контрасте (RGB).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +142,8 @@ impl Sys {
             border: text,
             border_strong: text,
             field: window,
+            popup: window,
+            popup_hover: c(mix(self.window, self.text, 0.25)),
             text,
             weak: text,
             faint: c(self.gray),
@@ -154,12 +154,6 @@ impl Sys {
             warning: text,
             danger: text,
         }
-    }
-
-    /// Акцент для виджетов набора: выделение и ссылка системы в обеих темах.
-    fn accent(&self) -> Accent {
-        let swatch = Swatch { fill: c(self.highlight), on_fill: c(self.highlight_text), text: c(self.hotlight) };
-        Accent { name: "Contrast", dark: swatch, light: swatch }
     }
 }
 
@@ -172,16 +166,13 @@ pub fn active(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp::<Option<Sys>>(state_id())).flatten().is_some()
 }
 
-/// Палитра окна: у высокого контраста — системная, иначе — набора.
+/// Палитра окна: у высокого контраста — системная (она же подменяет палитру набора), иначе — набора.
 pub fn palette(ctx: &Context) -> Palette {
-    match ctx.data(|d| d.get_temp::<Option<Sys>>(state_id())).flatten() {
-        Some(sys) => sys.palette(),
-        None => Palette::of_ctx(ctx),
-    }
+    Palette::of_ctx(ctx)
 }
 
-/// Звать каждый кадр: если высокий контраст включили или выключили, перекрасить стиль egui и акцент.
-/// `prefer` — тема из настроек, к ней возвращаемся, когда контраст выключен.
+/// Звать каждый кадр: если высокий контраст включили или выключили, подменить палитру набора на системную (или снять
+/// подмену) и выбрать тёмную или светлую основу. `prefer` — тема из настроек, к ней возвращаемся, когда контраст выключен.
 pub fn follow(ctx: &Context, prefer: ThemeChoice) {
     let now = read();
     let known = ctx.data(|d| d.get_temp::<Option<Sys>>(state_id())).flatten();
@@ -191,44 +182,12 @@ pub fn follow(ctx: &Context, prefer: ThemeChoice) {
     ctx.data_mut(|d| d.insert_temp(state_id(), now));
     match now {
         Some(sys) => {
-            // Акцент пересобирает стиль обеих тем; поверх него — цвета системы.
-            anvil_ui::set_accent(ctx, sys.accent());
-            let (window, text) = (c(sys.window), c(sys.text));
-            let line = Stroke::new(1.0, text);
-            for theme in [Theme::Dark, Theme::Light] {
-                ctx.style_mut_of(theme, |s| {
-                    let v = &mut s.visuals;
-                    v.override_text_color = Some(text);
-                    v.panel_fill = window;
-                    v.window_fill = window;
-                    v.extreme_bg_color = window;
-                    v.faint_bg_color = window;
-                    v.window_stroke = line;
-                    for w in [
-                        &mut v.widgets.noninteractive,
-                        &mut v.widgets.inactive,
-                        &mut v.widgets.hovered,
-                        &mut v.widgets.active,
-                        &mut v.widgets.open,
-                    ] {
-                        w.bg_fill = window;
-                        w.weak_bg_fill = window;
-                        w.bg_stroke = line;
-                        w.fg_stroke = line;
-                    }
-                    v.widgets.hovered.bg_fill = c(mix(sys.window, sys.text, 0.25));
-                    v.widgets.hovered.weak_bg_fill = c(mix(sys.window, sys.text, 0.25));
-                    v.selection.bg_fill = c(sys.highlight);
-                    v.selection.stroke = Stroke::new(1.0, c(sys.highlight_text));
-                });
-            }
+            // Все виджеты набора берут палитру из подмены; стиль egui пересобирается из неё сам.
+            anvil_ui::theme::set_palette_override(ctx, Some(sys.palette()));
             anvil_ui::choose(ctx, if sys.dark() { ThemeChoice::Dark } else { ThemeChoice::Light });
         }
         None => {
-            anvil_ui::set_accent(ctx, Accent::BLUE);
-            for theme in [Theme::Dark, Theme::Light] {
-                ctx.style_mut_of(theme, |s| s.visuals.override_text_color = None);
-            }
+            anvil_ui::theme::set_palette_override(ctx, None);
             anvil_ui::choose(ctx, prefer);
         }
     }

@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   release:
-    uses: AgitAngst/Anvil/.github/workflows/rust-release.yml@kit-v0.6.1
+    uses: AgitAngst/Anvil/.github/workflows/rust-release.yml@kit-v0.9.0
     with:
       app: kamerton
       bins: kamerton

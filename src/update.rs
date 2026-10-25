@@ -75,7 +75,7 @@ pub fn restart(tray: isize) -> Result<(), String> {
     Ok(())
 }
 
-/// Состояние для вида. Обычно настоящее; со `KAMERTON_UPDATE_DEMO=uptodate|checking|available|downloading|ready|failed` —
+/// Состояние для вида. Обычно настоящее; со `KAMERTON_UPDATE_DEMO=uptodate|checking|available|downloading|ready|failed|ratelimit` —
 /// выдуманное: так снимаются все состояния шапки «Настроек», не трогая GitHub.
 pub fn view_state(u: &Updater) -> State {
     let Ok(name) = std::env::var("KAMERTON_UPDATE_DEMO") else { return u.state() };
@@ -93,6 +93,7 @@ pub fn view_state(u: &Updater) -> State {
         "downloading" => State::Downloading { update: update(), done: 62, total: 100 },
         "ready" => State::Ready { update: update(), exe: std::path::PathBuf::new() },
         "failed" => State::Failed { update: None, error: "GitHub: HTTP 403".into() },
+        "ratelimit" => State::Failed { update: None, error: anvil_update::errors::rate_limit(403, 23) },
         _ => State::UpToDate,
     }
 }

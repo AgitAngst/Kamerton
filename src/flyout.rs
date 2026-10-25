@@ -1157,6 +1157,8 @@ enum Slot {
     App(AppAction, String),
     /// Сочетание устройства (id) — сделать его основным.
     Device(String),
+    /// Громкость устройства вывода (id): «Громче», «Тише», «Без звука».
+    DeviceVol(AppAction, String),
 }
 
 impl Slot {
@@ -1166,6 +1168,7 @@ impl Slot {
             Slot::Global(a) => format!("hotkey.{}", a.key()),
             Slot::App(a, exe) => format!("apphotkey.{}.{}", a.key(), exe),
             Slot::Device(id) => format!("devhotkey.{id}"),
+            Slot::DeviceVol(a, id) => format!("devvolkey.{}.{id}", a.key()),
         }
     }
 }
@@ -1235,6 +1238,15 @@ impl Flyout {
                 _ => None,
             })
         });
+        // Медиа-клавиши громкости egui не знает: их запомнил цикл окна.
+        if let Some(media) = crate::hotkeys::take_media() {
+            let mods = ui.input(|i| i.modifiers);
+            if let Some(c) = Combo::from_media(media, mods) {
+                self.store_combo(&slot, Some(c));
+                self.stop_capture();
+            }
+            return;
+        }
         let Some((key, mods)) = press else { return };
         let new = match key {
             Key::Escape => {
@@ -1247,31 +1259,40 @@ impl Flyout {
                 None => return,
             },
         };
-        {
-            let mut s = self.shared.settings.lock().unwrap();
-            match (&slot, new) {
-                (Slot::Global(a), Some(c)) => {
-                    s.hotkeys.insert(*a, c);
-                }
-                (Slot::Global(a), None) => {
-                    s.hotkeys.remove(a);
-                }
-                (Slot::App(a, exe), Some(c)) => {
-                    s.app_hotkeys.insert((*a, exe.clone()), c);
-                }
-                (Slot::App(a, exe), None) => {
-                    s.app_hotkeys.remove(&(*a, exe.clone()));
-                }
-                (Slot::Device(id), Some(c)) => {
-                    s.device_hotkeys.insert(id.clone(), c);
-                }
-                (Slot::Device(id), None) => {
-                    s.device_hotkeys.remove(id);
-                }
-            }
-            s.save();
-        }
+        self.store_combo(&slot, new);
         self.stop_capture();
+    }
+
+    /// Записать (или убрать) сочетание ячейки в настройки.
+    fn store_combo(&self, slot: &Slot, new: Option<Combo>) {
+        let mut s = self.shared.settings.lock().unwrap();
+        match (slot, new) {
+            (Slot::Global(a), Some(c)) => {
+                s.hotkeys.insert(*a, c);
+            }
+            (Slot::Global(a), None) => {
+                s.hotkeys.remove(a);
+            }
+            (Slot::App(a, exe), Some(c)) => {
+                s.app_hotkeys.insert((*a, exe.clone()), c);
+            }
+            (Slot::App(a, exe), None) => {
+                s.app_hotkeys.remove(&(*a, exe.clone()));
+            }
+            (Slot::Device(id), Some(c)) => {
+                s.device_hotkeys.insert(id.clone(), c);
+            }
+            (Slot::Device(id), None) => {
+                s.device_hotkeys.remove(id);
+            }
+            (Slot::DeviceVol(a, id), Some(c)) => {
+                s.device_vol_hotkeys.insert((*a, id.clone()), c);
+            }
+            (Slot::DeviceVol(a, id), None) => {
+                s.device_vol_hotkeys.remove(&(*a, id.clone()));
+            }
+        }
+        s.save();
     }
 
     /// Строка в два столбца: слева действие (у устройства — его значок), справа поле сочетания. Поле видно
@@ -2060,27 +2081,43 @@ impl Flyout {
                 .collect()
         };
         // Сочетания устройств — под подписью «Сделать основным:», иначе непонятно, что они делают.
-        let captioned =
-            |ui: &mut Ui, me: &mut Self, rows: Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)>| {
-                if rows.is_empty() {
-                    return;
-                }
-                hotkey_caption(ui);
-                for (name, slot, combo, kind) in rows {
-                    me.hotkey_row(ui, name, slot, combo, kind);
-                }
-            };
+        let captioned = |ui: &mut Ui,
+                         me: &mut Self,
+                         rows: Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)>,
+                         text: &str| {
+            if rows.is_empty() {
+                return;
+            }
+            hotkey_caption(ui, text);
+            for (name, slot, combo, kind) in rows {
+                me.hotkey_row(ui, name, slot, combo, kind);
+            }
+        };
         group(
             ui,
             self,
             T::OutputDevice.get(),
             vec![plain(global(Action::NextOutput)), plain(global(Action::PrevOutput))],
         );
-        captioned(ui, self, device_rows(Flow::Render));
+        captioned(ui, self, device_rows(Flow::Render), T::MakeDefaultCaption.get());
+        // Громкость каждого устройства вывода — в том числе неосновного.
+        for d in of_flow(snapshot, Flow::Render) {
+            let rows: Vec<_> = AppAction::ALL
+                .into_iter()
+                .map(|a| {
+                    let combo = settings.device_vol_hotkeys.get(&(a, d.id.clone())).copied();
+                    (app_action_text(a), Slot::DeviceVol(a, d.id.clone()), combo, None)
+                })
+                .collect();
+            hotkey_caption(ui, &format!("{} · {}", T::DeviceVolumeCaption.get().trim_end_matches(':'), d.name));
+            for (name, slot, combo, kind) in rows {
+                self.hotkey_row(ui, name, slot, combo, kind);
+            }
+        }
         let ins = device_rows(Flow::Capture);
         if !ins.is_empty() {
             hotkey_group(ui, T::InputDevice.get());
-            captioned(ui, self, ins);
+            captioned(ui, self, ins, T::MakeDefaultCaption.get());
         }
         // Программы: у которых уже есть сочетания, и та, чьё меню открыло страницу.
         let mut exes: Vec<String> = settings.app_hotkeys.keys().map(|(_, e)| e.clone()).collect();
@@ -2144,13 +2181,13 @@ fn hotkey_group(ui: &mut Ui, text: &str) {
 }
 
 /// Подпись над сочетаниями устройств: «Сделать основным:» — что делает сочетание.
-fn hotkey_caption(ui: &mut Ui) {
+fn hotkey_caption(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_CAPTION), Sense::hover());
     let p = crate::contrast::palette(ui.ctx());
     ui.painter().text(
         pos2(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
-        T::MakeDefaultCaption.get(),
+        text,
         FontId::proportional(11.5),
         p.weak,
     );

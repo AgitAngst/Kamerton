@@ -68,7 +68,55 @@ impl AppAction {
     }
 }
 
-/// Сочетание клавиш.
+/// Медиа-клавиши громкости: у них нет `egui::Key`, окно ловит их само (`shell.rs` → `note_media`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Media {
+    Up,
+    Down,
+    Mute,
+}
+
+impl Media {
+    pub const ALL: [Media; 3] = [Media::Up, Media::Down, Media::Mute];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Media::Up => "VolumeUp",
+            Media::Down => "VolumeDown",
+            Media::Mute => "VolumeMute",
+        }
+    }
+
+    /// Код клавиши Windows (`VK_VOLUME_*`).
+    pub fn vk(self) -> u32 {
+        match self {
+            Media::Up => 0xAF,
+            Media::Down => 0xAE,
+            Media::Mute => 0xAD,
+        }
+    }
+
+    fn by_name(name: &str) -> Option<Media> {
+        Media::ALL.into_iter().find(|m| m.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// Последняя медиа-клавиша, нажатая в окне (0 — нет): окно записи сочетания забирает её в `take_media`.
+static MEDIA_PRESS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Запомнить нажатую медиа-клавишу (зовёт цикл окна).
+pub fn note_media(m: Media) {
+    let n = Media::ALL.iter().position(|x| *x == m).unwrap_or(0) as u8 + 1;
+    MEDIA_PRESS.store(n, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Забрать запомненную медиа-клавишу.
+pub fn take_media() -> Option<Media> {
+    let n = MEDIA_PRESS.swap(0, std::sync::atomic::Ordering::SeqCst);
+    (n > 0).then(|| Media::ALL[n as usize - 1])
+}
+
+/// Сочетание клавиш. Медиа-клавиша, если задана, заменяет `key`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Combo {
     pub ctrl: bool,
@@ -76,6 +124,7 @@ pub struct Combo {
     pub shift: bool,
     pub win: bool,
     pub key: Key,
+    pub media: Option<Media>,
 }
 
 const MOD_ALT: u32 = 0x1;
@@ -86,7 +135,7 @@ const MOD_WIN: u32 = 0x8;
 impl Combo {
     /// `Ctrl+Alt+Up` → сочетание. Имена клавиш — как у egui (`Key::name`), регистр не важен.
     pub fn parse(text: &str) -> Option<Combo> {
-        let mut c = Combo { ctrl: false, alt: false, shift: false, win: false, key: Key::Escape };
+        let mut c = Combo { ctrl: false, alt: false, shift: false, win: false, key: Key::Escape, media: None };
         let mut key = None;
         for part in text.split('+').map(str::trim).filter(|p| !p.is_empty()) {
             match part.to_ascii_lowercase().as_str() {
@@ -95,14 +144,21 @@ impl Combo {
                 "shift" => c.shift = true,
                 "win" => c.win = true,
                 _ => {
-                    if key.is_some() {
+                    if key.is_some() || c.media.is_some() {
                         return None;
                     }
-                    key = Some(key_by_name(part)?);
+                    match Media::by_name(part) {
+                        Some(m) => c.media = Some(m),
+                        None => key = Some(key_by_name(part)?),
+                    }
                 }
             }
         }
-        c.key = key?;
+        match (key, c.media) {
+            (Some(k), None) => c.key = k,
+            (None, Some(_)) => {}
+            _ => return None,
+        }
         c.usable().then_some(c)
     }
 
@@ -118,12 +174,16 @@ impl Combo {
                 v.push(name.to_string());
             }
         }
-        v.push(self.key.name().to_string());
+        v.push(self.media.map_or_else(|| self.key.name(), Media::name).to_string());
         v
     }
 
     /// Не перехватывать обычный набор текста: нужен модификатор, кроме клавиш F1–F24.
     pub fn usable(self) -> bool {
+        if self.media.is_some() {
+            // Одинокая медиа-клавиша остаётся Windows (основное устройство): нужен модификатор.
+            return self.ctrl || self.alt || self.win || self.shift;
+        }
         (self.ctrl || self.alt || self.win || is_function(self.key)) && vk(self.key).is_some()
     }
 
@@ -146,12 +206,21 @@ impl Combo {
     }
 
     pub fn vk(self) -> Option<u32> {
-        vk(self.key)
+        match self.media {
+            Some(m) => Some(m.vk()),
+            None => vk(self.key),
+        }
     }
 
     /// Нажатие в окне → сочетание (если годится).
     pub fn from_press(key: Key, m: Modifiers) -> Option<Combo> {
-        let c = Combo { ctrl: m.ctrl, alt: m.alt, shift: m.shift, win: false, key };
+        let c = Combo { ctrl: m.ctrl, alt: m.alt, shift: m.shift, win: false, key, media: None };
+        c.usable().then_some(c)
+    }
+
+    /// Нажатая в окне медиа-клавиша с модификаторами → сочетание (если годится).
+    pub fn from_media(media: Media, m: Modifiers) -> Option<Combo> {
+        let c = Combo { ctrl: m.ctrl, alt: m.alt, shift: m.shift, win: false, key: Key::Escape, media: Some(media) };
         c.usable().then_some(c)
     }
 }
@@ -245,6 +314,21 @@ mod tests {
         assert_eq!(Combo::parse(&c.to_text()), Some(c));
         assert_eq!(Combo::parse("ctrl + shift + f9").unwrap().to_text(), "Ctrl+Shift+F9");
         assert_eq!(Combo::parse("F13").unwrap().vk(), Some(0x7C));
+    }
+
+    #[test]
+    fn media_keys_need_a_modifier() {
+        let c = Combo::parse("Shift+VolumeUp").unwrap();
+        assert_eq!(c.media, Some(Media::Up));
+        assert_eq!(c.vk(), Some(0xAF));
+        assert_eq!(c.to_text(), "Shift+VolumeUp");
+        assert_eq!(Combo::parse(&c.to_text()), Some(c));
+        assert_eq!(Combo::parse("ctrl+volumemute").unwrap().vk(), Some(0xAD));
+        assert_eq!(Combo::parse("VolumeDown"), None);
+        assert_eq!(Combo::parse("Ctrl+VolumeUp+A"), None);
+        assert_eq!(Combo::parse("Ctrl+VolumeUp+VolumeDown"), None);
+        assert_eq!(Combo::from_media(Media::Down, Modifiers::NONE), None);
+        assert_eq!(Combo::from_media(Media::Down, Modifiers::ALT).unwrap().to_text(), "Alt+VolumeDown");
     }
 
     #[test]

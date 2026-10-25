@@ -117,6 +117,8 @@ enum Bound {
     App(AppAction, String),
     /// Сделать устройство основным.
     Device(String),
+    /// Громкость устройства вывода (любого, не только основного).
+    DeviceVolume(AppAction, String),
 }
 
 /// Зарегистрированные сочетания трея: id → действие. Живут в потоке трея.
@@ -153,6 +155,9 @@ fn register_hotkeys(hwnd: HWND) {
         }
         for (id, c) in &settings.device_hotkeys {
             items.push((format!("devhotkey.{id}"), Bound::Device(id.clone()), *c));
+        }
+        for ((a, id), c) in &settings.device_vol_hotkeys {
+            items.push((format!("devvolkey.{}.{id}", a.key()), Bound::DeviceVolume(*a, id.clone()), *c));
         }
         for (n, (key, what, combo)) in items.into_iter().enumerate() {
             let id = n as i32 + 1;
@@ -209,6 +214,23 @@ fn run_hotkey(hwnd: HWND, id: i32) {
         }
         Bound::Device(id) => {
             let _ = c.set_default(&id, Roles::All);
+        }
+        Bound::DeviceVolume(action, id) => {
+            let Ok(s) = c.snapshot() else { return };
+            let Some(d) = s.devices.iter().find(|d| d.id == id && d.flow == Flow::Render) else { return };
+            let t = Target::Device(d.id.clone());
+            let (volume, muted) = match action {
+                AppAction::Louder => (model::step(d.volume, STEP), d.muted),
+                AppAction::Quieter => (model::step(d.volume, -STEP), d.muted),
+                AppAction::Mute => (d.volume, !d.muted),
+            };
+            let done = match action {
+                AppAction::Mute => c.set_muted(t, muted),
+                _ => c.set_volume(t, volume),
+            };
+            if done.is_ok() {
+                show_osd(hwnd, volume, muted);
+            }
         }
         Bound::App(action, exe) => {
             let Ok(s) = c.snapshot() else { return };

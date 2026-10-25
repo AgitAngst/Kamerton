@@ -70,6 +70,8 @@ pub struct Settings {
     pub app_hotkeys: BTreeMap<(AppAction, String), Combo>,
     /// Сочетание на устройство — сделать его основным: `devhotkey.<id устройства>=<сочетание>`.
     pub device_hotkeys: BTreeMap<String, Combo>,
+    /// Громкость устройства вывода с клавиатуры: `devvolkey.<louder|quieter|mute>.<id устройства>=<сочетание>`.
+    pub device_vol_hotkeys: BTreeMap<(AppAction, String), Combo>,
     /// Потолок громкости устройства вывода по умолчанию, проценты 1..99: `limit_device=80`.
     pub limit_device: Option<u8>,
     /// Потолки программ, проценты 1..99: `limit_app.<путь exe в нижнем регистре>=60`.
@@ -129,6 +131,7 @@ impl Default for Settings {
             hotkeys: BTreeMap::new(),
             app_hotkeys: BTreeMap::new(),
             device_hotkeys: BTreeMap::new(),
+            device_vol_hotkeys: BTreeMap::new(),
             limit_device: None,
             limit_apps: BTreeMap::new(),
             night: false,
@@ -348,6 +351,13 @@ impl Settings {
                 {
                     s.device_hotkeys.insert(id.to_string(), c);
                 }
+            } else if let Some(rest) = k.strip_prefix("devvolkey.") {
+                if let Some((a, id)) = rest.split_once('.')
+                    && let (Some(a), Some(c)) = (AppAction::from_key(a), Combo::parse(v))
+                    && !id.is_empty()
+                {
+                    s.device_vol_hotkeys.insert((a, id.to_string()), c);
+                }
             } else if let Some(rest) = k.strip_prefix("apphotkey.") {
                 if let Some((a, exe)) = rest.split_once('.')
                     && let (Some(a), Some(c)) = (AppAction::from_key(a), Combo::parse(v))
@@ -465,6 +475,14 @@ impl Settings {
         for (id, c) in &self.device_hotkeys {
             out.push_str(&format!("devhotkey.{id}={}\n", c.to_text()));
         }
+        for ((a, id), c) in &self.device_vol_hotkeys {
+            out.push_str(&format!(
+                "devvolkey.{}.{id}={}
+",
+                a.key(),
+                c.to_text()
+            ));
+        }
         for (exe, (vol, muted)) in &self.memory {
             out.push_str(&format!("appvol={}|{}|{}\n", exe, pct(*vol), if *muted { 1 } else { 0 }));
         }
@@ -545,6 +563,22 @@ mod tests {
             "expanded=1\ntheme=system\nlang=system\nanimate=1\nwheel_outside=0\nlog_scale=0\nosd=1\ntray_icon=mark\ntray_color=purple\nremember=1\nupdates=1\nprerelease=0\nfuture=yes\n# note\n"
         );
         assert_eq!(Settings::parse(&s.format()), s);
+    }
+
+    #[test]
+    fn device_volume_hotkeys_round_trip() {
+        let s = Settings::parse(
+            "devvolkey.louder.{0.0.0.00000000}.{demo-1}=Shift+VolumeUp
+devvolkey.mute.{demo-1}=Ctrl+Alt+M
+devvolkey.bogus.x=Ctrl+Alt+1
+devvolkey.louder.=Ctrl+Alt+2
+",
+        );
+        assert_eq!(s.device_vol_hotkeys.len(), 2);
+        let key = (AppAction::Louder, "{0.0.0.00000000}.{demo-1}".to_string());
+        assert_eq!(s.device_vol_hotkeys[&key].to_text(), "Shift+VolumeUp");
+        let back = Settings::parse(&s.format());
+        assert_eq!(back.device_vol_hotkeys, s.device_vol_hotkeys);
     }
 
     #[test]

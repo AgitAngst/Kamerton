@@ -133,6 +133,7 @@ pub enum T {
     RecordingApps,
     NoRecordingApps,
     MakeDefaultCaption,
+    DeviceVolumeCaption,
     AppHotkeysHint,
     DefaultBadge,
     Input,
@@ -179,7 +180,7 @@ pub enum T {
 
 impl T {
     #[cfg(test)]
-    pub const ALL: [T; 137] = [
+    pub const ALL: [T; 138] = [
         T::NoApps,
         T::Mute,
         T::Unmute,
@@ -276,6 +277,7 @@ impl T {
         T::RecordingApps,
         T::NoRecordingApps,
         T::MakeDefaultCaption,
+        T::DeviceVolumeCaption,
         T::AppHotkeysHint,
         T::DefaultBadge,
         T::Input,
@@ -387,8 +389,8 @@ impl T {
             T::GroupWindow => ("Окно", "Window"),
             T::GroupVolume => ("Громкость", "Volume"),
             T::HotkeysHint => (
-                "Щёлкните поле, чтобы задать сочетание. Esc — отмена, Backspace — убрать.",
-                "Click a field to set a hotkey. Esc — cancel, Backspace — remove.",
+                "Щёлкните поле, чтобы задать сочетание. Esc — отмена, Backspace — убрать. Медиа-клавиши громкости — с Shift, Ctrl или Alt.",
+                "Click a field to set a hotkey. Esc — cancel, Backspace — remove. Volume media keys work with Shift, Ctrl or Alt.",
             ),
 
             T::OutputDevice => ("Устройство вывода", "Output device"),
@@ -428,6 +430,7 @@ impl T {
             T::RecordingApps => ("Программы записи", "Recording apps"),
             T::NoRecordingApps => ("Микрофон никто не слушает", "No app is using the microphone"),
             T::MakeDefaultCaption => ("Сделать основным:", "Make default:"),
+            T::DeviceVolumeCaption => ("Громкость устройства:", "Device volume:"),
             T::AppHotkeysHint => (
                 "Сочетания программы — правый щелчок по её строке → «Горячие клавиши…»",
                 "App hotkeys: right-click its row → “Hotkeys…”",

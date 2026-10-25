@@ -171,6 +171,24 @@ impl Shell {
     }
 }
 
+/// Медиа-клавиши громкости egui не отдаёт — запомнить для окна записи сочетания (`hotkeys::take_media`).
+fn note_media_key(event: &WindowEvent) {
+    use winit::event::ElementState;
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    if let WindowEvent::KeyboardInput { event, .. } = event
+        && event.state == ElementState::Pressed
+        && let PhysicalKey::Code(code) = event.physical_key
+    {
+        let media = match code {
+            KeyCode::AudioVolumeUp => crate::hotkeys::Media::Up,
+            KeyCode::AudioVolumeDown => crate::hotkeys::Media::Down,
+            KeyCode::AudioVolumeMute => crate::hotkeys::Media::Mute,
+            _ => return,
+        };
+        crate::hotkeys::note_media(media);
+    }
+}
+
 impl ApplicationHandler<Wake> for Shell {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -234,6 +252,7 @@ impl ApplicationHandler<Wake> for Shell {
             }
             WindowEvent::Destroyed => el.exit(),
             other => {
+                note_media_key(&other);
                 if let (Some(window), Some(state)) = (&self.window, &mut self.state)
                     && state.on_window_event(window, &other).repaint
                 {

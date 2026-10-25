@@ -34,6 +34,9 @@ pub const PAD_Y: f32 = 12.0;
 /// Строка устройства в колонке окна микшера (`--mixer`).
 pub const DEVICE_ROW: f32 = 52.0;
 pub const APP_ROW: f32 = 50.0;
+/// На сколько строка программы раскрывается вниз, когда наведён курсор на подпись «→ устройство»: ниже имени
+/// появляется подпись целиком. Окно растёт на столько же (`Flyout::row_extra`).
+const APP_EXTRA: f32 = 20.0;
 /// Окно у значка (вид «Вывод звука» Windows 11): отступ сверху, заголовок раздела, строка устройства
 /// в списке и зазор между ними, черта между разделами, заголовок микшера, отступ снизу, полоса внизу.
 pub const TOP: f32 = 10.0;
@@ -357,6 +360,9 @@ pub struct Flyout {
     standalone: bool,
     spot: Option<Spot>,
     want_h: f32,
+    /// Насколько раскрыты строки программ в этом кадре (прибавляется к высоте окна) и сколько насчитали за кадр.
+    row_extra: f32,
+    row_extra_next: f32,
     by_click: bool,
     was_focused: bool,
     /// Снять плащ после ближайшего `Present` — кадр уже на месте.
@@ -533,6 +539,8 @@ impl Flyout {
             standalone,
             spot: None,
             want_h,
+            row_extra: 0.0,
+            row_extra_next: 0.0,
             by_click: false,
             was_focused: false,
             reveal: false,
@@ -585,6 +593,8 @@ impl Flyout {
     fn mixer_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let Ok(all) = self.control.snapshot() else { return };
+        // Выдуманные устройства и программы для снимков (`KAMERTON_DEMO_MIXER=1`): без настоящих имён.
+        let all = demo_snapshot().unwrap_or(all);
         let snapshot = self.shared.visible(&all);
         self.all = all;
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
@@ -1004,6 +1014,7 @@ impl crate::shell::Content for Flyout {
         // глифы шрифтов, текстуры. Иначе первый щелчок ждал бы их ~0,2 с.
         let warming = !self.started && !self.standalone;
         if self.shared.state.load(Ordering::SeqCst) == HIDDEN && !warming {
+            self.row_extra_next = 0.0;
             return;
         }
         self.frames += 1;
@@ -1020,6 +1031,8 @@ impl crate::shell::Content for Flyout {
         self.was_focused |= focused;
 
         let Ok(all) = self.control.snapshot() else { return };
+        // Выдуманные устройства и программы для снимков (`KAMERTON_DEMO_MIXER=1`): без настоящих имён.
+        let all = demo_snapshot().unwrap_or(all);
         let snapshot = self.shared.visible(&all);
         let peaks: HashMap<Target, f32> = self.control.peaks().into_iter().collect();
         // Windows сама поменяла размер или место (смена масштаба монитора, EarTrumpet #1304) — на место.
@@ -1037,8 +1050,13 @@ impl crate::shell::Content for Flyout {
             ctx.request_repaint();
         }
         self.all = all;
-        let want =
-            if self.page != Page::Mixer { self.page_h } else { content_height(&snapshot, self.shared.expanded()) };
+        // Раскрытые строки программ (подпись «→ устройство» целиком) растят окно: их насчитал прошлый кадр.
+        self.row_extra = std::mem::take(&mut self.row_extra_next);
+        let want = if self.page != Page::Mixer {
+            self.page_h
+        } else {
+            content_height(&snapshot, self.shared.expanded()) + self.row_extra
+        };
         if (self.want_h - want).abs() > 0.5 {
             self.want_h = want;
             self.layout();
@@ -2839,11 +2857,38 @@ impl Flyout {
         dest: Option<&str>,
         silent: bool,
     ) {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), APP_ROW), Sense::hover());
-        let row = ui.interact(rect, ui.id().with(("approw", key_id(&a.key))), Sense::click());
         let p = crate::contrast::palette(ui.ctx());
         let ctx = ui.ctx().clone();
-        let icon_rect = Rect::from_min_size(pos2(rect.left(), rect.center().y - ICON / 2.0), Vec2::splat(ICON));
+        // Подпись «→ устройство» усечена — при наведении на неё строка раскрывается и показывает её целиком (только в
+        // окне у значка: в окне микшера высота не растёт). Раскрыта ли строка — в памяти egui, плавность — по кривой набора.
+        let expandable = dest.is_some() && !self.mixer;
+        let exp_id = ui.id().with(("appexp", key_id(&a.key)));
+        let open = expandable
+            && (std::env::var_os("KAMERTON_EXPAND").is_some()
+                || ctx.data(|d| d.get_temp::<bool>(exp_id)).unwrap_or(false));
+        let progress = if expandable && std::env::var_os("KAMERTON_EXPAND").is_some() {
+            // Для снимков: раскрыто сразу, без движения.
+            1.0
+        } else if expandable {
+            anvil_ui::motion::Motion::of(&ctx).value(
+                &ctx,
+                exp_id.with("progress"),
+                if open { 1.0 } else { 0.0 },
+                anvil_ui::motion::LAYOUT,
+            )
+        } else {
+            0.0
+        };
+        let extra = APP_EXTRA * progress;
+        self.row_extra_next += extra;
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), APP_ROW + extra), Sense::hover());
+        // Значок, число и кнопка — по первым 50 px: они не уезжают вместе с раскрытием.
+        let base = Rect::from_min_size(rect.min, vec2(rect.width(), APP_ROW));
+        let row = ui.interact(rect, ui.id().with(("approw", key_id(&a.key))), Sense::click());
+        if progress > 0.0 {
+            ui.painter().rect_filled(rect, radius::CONTROL, p.hover.gamma_multiply(progress));
+        }
+        let icon_rect = Rect::from_min_size(pos2(base.left(), base.center().y - ICON / 2.0), Vec2::splat(ICON));
         if let Some(tex) = if a.system { None } else { self.icon_for(&ctx, a) } {
             ui.painter().image(tex.id(), icon_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         } else {
@@ -2855,14 +2900,14 @@ impl Flyout {
                 anvil_ui::icons::paint(ui.painter(), inner, anvil_ui::Icon::Window, p.weak);
             }
         }
-        let button = Rect::from_center_size(pos2(rect.right() - BUTTON / 2.0, rect.center().y), Vec2::splat(BUTTON));
+        let button = Rect::from_center_size(pos2(base.right() - BUTTON / 2.0, base.center().y), Vec2::splat(BUTTON));
         let number = Rect::from_min_max(
-            pos2(button.left() - 8.0 - NUMBER_W, rect.top()),
-            pos2(button.left() - 8.0, rect.bottom()),
+            pos2(button.left() - 8.0 - NUMBER_W, base.top()),
+            pos2(button.left() - 8.0, base.bottom()),
         );
         let left = icon_rect.right() + 10.0;
         let name = app_name(a);
-        let name_rect = Rect::from_min_max(pos2(left, rect.top() + 6.0), pos2(number.left() - 8.0, rect.top() + 24.0));
+        let name_rect = Rect::from_min_max(pos2(left, base.top() + 6.0), pos2(number.left() - 8.0, base.top() + 24.0));
         let quiet = a.muted || silent;
         let name_color = if quiet { p.weak } else { p.text };
         // Мелко после имени: «→ устройство» у программы не на основном, номер процесса — у программы без имени.
@@ -2879,7 +2924,27 @@ impl Flyout {
                 let name_part = Rect::from_min_max(name_rect.min, pos2(split, name_rect.bottom()));
                 text_clipped(ui, name_part, &name, FontId::proportional(14.0), name_color);
                 let rest = Rect::from_min_max(pos2(split + 6.0, name_rect.top() + 1.0), name_rect.max);
-                text_clipped(ui, rest, &sub, FontId::proportional(11.5), p.weak);
+                if expandable {
+                    // Усечённая подпись растворяется, под именем проявляется полная; наведение на усечённую — раскрыть.
+                    paint_clipped(ui, rest, &sub, FontId::proportional(11.5), p.weak.gamma_multiply(1.0 - progress));
+                    if progress > 0.0 {
+                        let line = Rect::from_min_max(
+                            pos2(left, base.top() + 25.0 + (progress - 1.0) * 4.0),
+                            pos2(rect.right() - 12.0, base.top() + 42.0 + (progress - 1.0) * 4.0),
+                        );
+                        text_clipped(ui, line, &sub, FontId::proportional(11.5), p.text.gamma_multiply(progress));
+                    }
+                    let pointer = ctx.input(|i| i.pointer.hover_pos());
+                    let on_sub = pointer.is_some_and(|pt| rest.contains(pt)) && !open;
+                    let in_row = pointer.is_some_and(|pt| rect.contains(pt));
+                    let want_open = on_sub || (open && in_row);
+                    if want_open != open {
+                        ctx.data_mut(|d| d.insert_temp(exp_id, want_open));
+                        ctx.request_repaint();
+                    }
+                } else {
+                    text_clipped(ui, rest, &sub, FontId::proportional(11.5), p.weak);
+                }
             }
             None => text_clipped(ui, name_rect, &name, FontId::proportional(14.0), name_color),
         }
@@ -2896,8 +2961,10 @@ impl Flyout {
                 ctx.set_cursor_icon(if drag.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
             }
         }
-        let track =
-            Rect::from_min_max(pos2(left - 7.0, rect.top() + 27.0), pos2(number.left() - 10.0, rect.top() + 43.0));
+        let track = Rect::from_min_max(
+            pos2(left - 7.0, base.top() + 27.0 + extra),
+            pos2(number.left() - 10.0, base.top() + 43.0 + extra),
+        );
         let target = Target::App(a.key.clone());
         let shown = self.shown_value(&target, a.volume);
         let out = slider(ui, ui.id().with(("app", key_id(&a.key))), track, shown, quiet, peak);
@@ -3005,16 +3072,69 @@ impl Flyout {
     }
 }
 
+/// Выдуманный снимок для проверки вида: колонки и двое одинаковых наушников, у двух программ звук идёт в разные.
+fn demo_snapshot() -> Option<Snapshot> {
+    std::env::var_os("KAMERTON_DEMO_MIXER")?;
+    let app = |device: &str, exe: &str, name: &str, volume: f32, pinned: Option<&str>| App {
+        key: AppKey { device: device.into(), exe: exe.into() },
+        name: name.into(),
+        path: None,
+        volume,
+        muted: false,
+        system: false,
+        pids: vec![100],
+        pinned: pinned.map(str::to_string),
+    };
+    let device = |id: &str, name: &str, default: bool, flow: Flow, apps: Vec<App>| Device {
+        id: id.into(),
+        name: name.into(),
+        flow,
+        volume: 0.54,
+        muted: false,
+        is_default: default,
+        is_comm: default,
+        balance: None,
+        apps,
+    };
+    Some(Snapshot {
+        can_route: true,
+        devices: vec![
+            device(
+                "spk",
+                "Speakers (Demo Audio)",
+                true,
+                Flow::Render,
+                vec![app("spk", "unity.exe", "Unity Editor", 1.0, None)],
+            ),
+            device(
+                "hp5",
+                "Headphones (WH-1000XM5 Stereo)",
+                false,
+                Flow::Render,
+                vec![app("hp5", "spotify.exe", "Spotify", 0.62, Some("hp5"))],
+            ),
+            device(
+                "hp4",
+                "Headphones (WH-1000XM4 Stereo)",
+                false,
+                Flow::Render,
+                vec![app("hp4", "discord.exe", "Discord", 0.35, Some("hp4"))],
+            ),
+            device("mic", "Microphone (Demo Audio)", true, Flow::Capture, vec![]),
+        ],
+    })
+}
+
 fn key_id(k: &AppKey) -> (String, String) {
     (k.device.clone(), k.exe.clone())
 }
 
-/// Текст в одну строку; длинный — с «…», полный — в подсказке.
-fn text_clipped(ui: &mut Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+/// Текст в одну строку; длинный — с «…» (без подсказки). `true` — текст усечён.
+fn paint_clipped(ui: &mut Ui, rect: Rect, text: &str, font: FontId, color: Color32) -> bool {
     let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), color);
     if galley.size().x <= rect.width() {
         ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
-        return;
+        return false;
     }
     let mut cut: String = text.to_string();
     while !cut.is_empty() {
@@ -3025,7 +3145,14 @@ fn text_clipped(ui: &mut Ui, rect: Rect, text: &str, font: FontId, color: Color3
             break;
         }
     }
-    ui.interact(rect, ui.id().with(("tip", text)), Sense::hover()).on_hover_text(text);
+    true
+}
+
+/// Текст в одну строку; длинный — с «…», полный — в подсказке.
+fn text_clipped(ui: &mut Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+    if paint_clipped(ui, rect, text, font, color) {
+        ui.interact(rect, ui.id().with(("tip", text)), Sense::hover()).on_hover_text(text);
+    }
 }
 
 fn number_text(ui: &mut Ui, rect: Rect, v: f32, muted: bool) {

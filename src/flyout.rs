@@ -53,17 +53,16 @@ const INSET: f32 = 4.0;
 const ITEM_PAD: f32 = PAD_X - INSET;
 /// Страница сочетаний: строка, ширина поля сочетания (по содержимому, от и до), строка подписи раздела,
 /// подпись «Сделать основным:» над устройствами.
-const HOTKEY_ROW: f32 = 32.0;
-const HOTKEY_FIELD_MIN: f32 = 96.0;
-const HOTKEY_FIELD: f32 = 160.0;
-const HOTKEY_GROUP: f32 = 30.0;
-const HOTKEY_CAPTION: f32 = 22.0;
 /// Страница настроек: ширина переключателей «Тема» и «Язык», строка перехода на страницу.
 const SEGMENTED_W: f32 = 240.0;
 const NAV_TILE: f32 = 52.0;
 /// Вкладка «Настроек»: высота полосы вкладок и минимальная высота тела (одна на все вкладки — окно не прыгает).
 const TAB_H: f32 = 32.0;
 const TAB_BODY_H: f32 = 176.0;
+/// Тело вкладки страниц «Горячие клавиши», «Профили», «Правила»: не ниже, чтобы окно не прыгало при смене вкладки.
+const HK_BODY_H: f32 = 330.0;
+const PROFILES_BODY_H: f32 = 200.0;
+const RULES_BODY_H: f32 = 260.0;
 /// Кнопка «устройства ввода» внизу: микрофон и стрелка.
 const TOGGLE_W: f32 = 44.0;
 pub const EMPTY_ROW: f32 = 30.0;
@@ -403,6 +402,9 @@ pub struct Flyout {
     /// Запрос в поиске по «Настройкам».
     /// Вкладка страницы «Настройки» (помнится, пока программа работает).
     settings_tab: SettingsTab,
+    hotkeys_tab: HotkeyTab,
+    profiles_tab: ProfilesTab,
+    rules_tab: RulesTab,
     /// Плашка громкости: где поставлена; `None` — окно не в режиме плашки.
     osd_at: Option<OsdPlace>,
     /// Снять плащ после ближайшего `Present` — кадр плашки уже на месте.
@@ -503,9 +505,30 @@ impl Flyout {
         f.want_h = content_height(&snapshot, f.shared.expanded());
         // Проверка вида: `KAMERTON_PAGE=hotkeys|profiles` — сразу страница настроек.
         match std::env::var("KAMERTON_PAGE").as_deref() {
-            Ok("hotkeys") => f.page = Page::Hotkeys,
-            Ok("profiles") => f.page = Page::Profiles,
-            Ok("rules") => f.page = Page::Rules,
+            Ok("hotkeys") => {
+                f.page = Page::Hotkeys;
+                f.hotkeys_tab = match std::env::var("KAMERTON_TAB").as_deref() {
+                    Ok("devices") => HotkeyTab::Devices,
+                    Ok("apps") => HotkeyTab::Apps,
+                    _ => HotkeyTab::General,
+                };
+            }
+            Ok("profiles") => {
+                f.page = Page::Profiles;
+                f.profiles_tab = if std::env::var("KAMERTON_TAB").as_deref() == Ok("list") {
+                    ProfilesTab::List
+                } else {
+                    ProfilesTab::Memory
+                };
+            }
+            Ok("rules") => {
+                f.page = Page::Rules;
+                f.rules_tab = match std::env::var("KAMERTON_TAB").as_deref() {
+                    Ok("duck") => RulesTab::Duck,
+                    Ok("apps") => RulesTab::Apps,
+                    _ => RulesTab::Limit,
+                };
+            }
             // `KAMERTON_TAB=window|system|hidden` — вкладка «Настроек» (по умолчанию «Вид»).
             Ok("settings") => {
                 f.page = Page::Settings;
@@ -572,6 +595,9 @@ impl Flyout {
             icon_color: None,
             had_focus: false,
             settings_tab: SettingsTab::Look,
+            hotkeys_tab: HotkeyTab::General,
+            profiles_tab: ProfilesTab::Memory,
+            rules_tab: RulesTab::Limit,
             osd_at: None,
             osd_reveal: false,
         }
@@ -1186,6 +1212,27 @@ enum Page {
     Settings,
 }
 
+/// Вкладки страниц «Горячие клавиши», «Профили» и «Правила».
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HotkeyTab {
+    General,
+    Devices,
+    Apps,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProfilesTab {
+    Memory,
+    List,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RulesTab {
+    Limit,
+    Duck,
+    Apps,
+}
+
 /// Вкладки страницы «Настройки».
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -1340,85 +1387,117 @@ impl Flyout {
         s.save();
     }
 
-    /// Строка в два столбца: слева действие (у устройства — его значок), справа поле сочетания. Поле видно
-    /// и без курсора (рамка `border`), ширина — по содержимому. Щелчок — запись; занятое другой
-    /// программой — красная точка; не задано — «Не задано».
-    fn hotkey_row(
-        &mut self,
-        ui: &mut Ui,
-        name: &str,
-        slot: Slot,
-        combo: Option<Combo>,
-        kind: Option<icons::DeviceKind>,
-    ) {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_ROW), Sense::hover());
+    /// Поле сочетания в заданном месте (макет «Горячие клавиши», вариант 1, 25.10.2026): рамка `border_strong`, внутри текст
+    /// сочетания (моно 11.5) по центру, не задано — «—»; идёт запись — рамка `accent` 1.5, подложка и «Нажмите…»; занято другой
+    /// программой — красная точка слева. Щелчок — запись.
+    fn hotkey_field(&mut self, ui: &mut Ui, rect: Rect, name: &str, slot: Slot, combo: Option<Combo>) {
         let p = crate::contrast::palette(ui.ctx());
         let capturing = self.capture.as_ref() == Some(&slot);
         let taken = combo.is_some() && self.shared.hotkey_free.lock().unwrap().get(&slot.key()).copied() == Some(false);
-        let text_w = |text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_string(), font, p.text).size().x;
-        let content = if capturing {
-            text_w(T::PressKeys.get(), FontId::proportional(12.5))
-        } else if let Some(combo) = combo {
-            let parts = combo.parts();
-            let keys: f32 = parts.iter().map(|k| text_w(k, FontId::monospace(11.5)) + 10.0).sum();
-            keys + 3.0 * (parts.len() as f32 - 1.0) + if taken { 12.0 } else { 0.0 }
-        } else {
-            text_w(T::NotSet.get(), FontId::proportional(12.5))
-        };
-        let width = (content + 14.0).clamp(HOTKEY_FIELD_MIN, HOTKEY_FIELD);
-        let field =
-            Rect::from_min_max(pos2(rect.right() - width, rect.top() + 3.0), pos2(rect.right(), rect.bottom() - 3.0));
-        let mut left = rect.left();
-        if let Some(kind) = kind {
-            let glyph = Rect::from_center_size(pos2(left + 7.5, rect.center().y), Vec2::splat(15.0));
-            icons::device(ui.painter(), glyph, p.text, kind);
-            left = glyph.right() + 8.0;
-        }
-        let label = Rect::from_min_max(pos2(left, rect.top()), pos2(field.left() - 10.0, rect.bottom()));
-        text_clipped(ui, label, name, FontId::proportional(13.5), p.text);
-
-        let response = ui.interact(field, ui.id().with(("hotkey", slot.key())), Sense::click());
+        let response = ui.interact(rect, ui.id().with(("hotkey", slot.key())), Sense::click());
         if capturing {
-            ui.painter().rect_filled(field, radius::CONTROL, p.soft(p.accent));
-            ui.painter().rect_stroke(field, radius::CONTROL, Stroke::new(1.5, p.accent), StrokeKind::Inside);
+            ui.painter().rect_filled(rect, radius::CONTROL, p.soft(p.accent));
+            ui.painter().rect_stroke(rect, radius::CONTROL, Stroke::new(1.5, p.accent), StrokeKind::Inside);
         } else {
             if response.hovered() {
-                ui.painter().rect_filled(field, radius::CONTROL, p.hover);
+                ui.painter().rect_filled(rect, radius::CONTROL, p.hover);
             }
-            ui.painter().rect_stroke(field, radius::CONTROL, Stroke::new(1.0, p.border), StrokeKind::Inside);
+            ui.painter().rect_stroke(rect, radius::CONTROL, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
         }
-        let mut x = field.right() - 6.0;
-        let y = field.center().y;
-        if capturing {
-            ui.painter().text(
-                pos2(x, y),
-                Align2::RIGHT_CENTER,
-                T::PressKeys.get(),
-                FontId::proportional(12.5),
-                p.accent_text,
-            );
+        let (text, font, color) = if capturing {
+            (T::PressKeys.get().to_string(), FontId::proportional(12.0), p.accent_text)
         } else if let Some(combo) = combo {
-            let color = if taken { p.text } else { p.weak };
-            for part in combo.parts().iter().rev() {
-                let galley = ui.painter().layout_no_wrap(part.clone(), FontId::monospace(11.5), color);
-                let chip = Rect::from_min_max(pos2(x - galley.size().x - 10.0, y - 9.5), pos2(x, y + 9.5));
-                ui.painter().rect(chip, radius::SMALL, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
-                ui.painter().galley(chip.center() - galley.size() / 2.0, galley, color);
-                x = chip.left() - 3.0;
-            }
-            if taken {
-                ui.painter().circle_filled(pos2(x - 5.0, y), 3.5, p.danger);
-            }
+            (combo.to_text(), anvil_ui::semibold(12.0), p.text)
         } else {
-            ui.painter().text(pos2(x, y), Align2::RIGHT_CENTER, T::NotSet.get(), FontId::proportional(12.5), p.faint);
+            ("—".to_string(), FontId::proportional(12.5), p.faint)
+        };
+        let inner = rect.shrink2(vec2(if taken { 14.0 } else { 6.0 }, 0.0));
+        let width = ui.painter().layout_no_wrap(text.clone(), font.clone(), color).size().x;
+        if width <= inner.width() {
+            let center = pos2(rect.center().x + if taken { 4.0 } else { 0.0 }, rect.center().y);
+            ui.painter().text(center, Align2::CENTER_CENTER, &text, font, color);
+        } else {
+            text_clipped(ui, inner, &text, font, color);
         }
-        anvil_ui::widgets::focus_ring(ui, field, &response, radius::CONTROL);
+        if taken {
+            ui.painter().circle_filled(pos2(rect.left() + 9.0, rect.center().y), 3.5, p.danger);
+        }
+        anvil_ui::widgets::focus_ring(ui, rect, &response, radius::CONTROL);
         let hint = if capturing { T::CaptureHint.get() } else { T::Change.get() };
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
         if response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() && !capturing {
             self.stop_capture();
             self.start_capture(slot);
         }
+    }
+
+    /// Строка «действие — поле» (вкладка «Общие»): слева подпись, справа поле шириной 150.
+    fn hotkey_line(&mut self, ui: &mut Ui, name: &str, slot: Slot, combo: Option<Combo>) {
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+        let p = crate::contrast::palette(ui.ctx());
+        let field =
+            Rect::from_min_max(pos2(row.right() - 150.0, row.top() + 4.0), pos2(row.right(), row.bottom() - 4.0));
+        let label = Rect::from_min_max(row.min, pos2(field.left() - 10.0, row.bottom()));
+        text_clipped(ui, label, name, FontId::proportional(13.5), p.text);
+        self.hotkey_field(ui, field, name, slot, combo);
+    }
+
+    /// Карточка устройства или программы (вкладки «Устройства» и «Программы»): значок, имя, метка «Основное», под ними
+    /// поля сочетаний в `cols` столбцов с подписями над ними.
+    fn hotkey_card(
+        &mut self,
+        ui: &mut Ui,
+        icon: CardIcon,
+        name: &str,
+        badge: bool,
+        cols: usize,
+        fields: Vec<(&str, Slot, Option<Combo>)>,
+    ) {
+        let p = crate::contrast::palette(ui.ctx());
+        egui::Frame::new()
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(radius::CARD)
+            .inner_margin(egui::Margin::symmetric(10, 9))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+                let glyph = Rect::from_center_size(pos2(head.left() + 8.0, head.center().y), Vec2::splat(16.0));
+                match icon {
+                    CardIcon::Device(kind) => icons::device(ui.painter(), glyph, p.weak, kind),
+                    CardIcon::App => anvil_ui::icons::paint(ui.painter(), glyph, anvil_ui::Icon::Window, p.weak),
+                }
+                let mut right = head.right();
+                if badge {
+                    let font = FontId::proportional(11.0);
+                    let galley = ui.painter().layout_no_wrap(T::DefaultBadge.get().to_string(), font, p.accent_text);
+                    let pill = Rect::from_min_max(
+                        pos2(right - galley.size().x - 14.0, head.center().y - 9.0),
+                        pos2(right, head.center().y + 9.0),
+                    );
+                    ui.painter().rect_stroke(pill, 9, Stroke::new(1.0, p.accent), StrokeKind::Inside);
+                    ui.painter().galley(pill.center() - galley.size() / 2.0, galley, p.accent_text);
+                    right = pill.left() - 8.0;
+                }
+                let title = Rect::from_min_max(pos2(head.left() + 24.0, head.top()), pos2(right, head.bottom()));
+                text_clipped(ui, title, name, FontId::proportional(13.5), p.text);
+                ui.add_space(7.0);
+                let gap = 8.0;
+                let width = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (caption, slot, combo) in fields {
+                        ui.vertical(|ui| {
+                            ui.set_width(width);
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            let (cap, _) = ui.allocate_exact_size(vec2(width, 14.0), Sense::hover());
+                            text_clipped(ui, cap, caption, FontId::proportional(11.5), p.weak);
+                            let (field, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+                            self.hotkey_field(ui, field, caption, slot, combo);
+                        });
+                    }
+                });
+            });
+        ui.add_space(8.0);
     }
 
     fn settings_page(&mut self, ui: &mut Ui) {
@@ -1449,7 +1528,16 @@ impl Flyout {
         }
 
         ui.add_space(10.0);
-        tab_bar(ui, &mut self.settings_tab);
+        tab_bar(
+            ui,
+            &mut self.settings_tab,
+            &[
+                (SettingsTab::Look, T::TabLook.get()),
+                (SettingsTab::Window, T::WindowSection.get()),
+                (SettingsTab::System, T::TabSystem.get()),
+                (SettingsTab::Hidden, T::Hidden.get()),
+            ],
+        );
         ui.add_space(6.0);
         // Тело вкладки не ниже самой высокой из них: окно не прыгает при смене вкладки.
         ui.scope(|ui| {
@@ -1839,93 +1927,123 @@ impl Flyout {
         let mut st = self.shared.settings.lock().unwrap().clone();
         let before = st.clone();
 
-        anvil_ui::widgets::section_label(ui, T::MemoryTitle.get());
-        anvil_ui::widgets::switch(ui, &mut st.remember, T::RememberVolumes.get());
-        ui.add_space(4.0);
-        let mut new_on = st.new_app_volume.is_some();
-        anvil_ui::widgets::switch(ui, &mut new_on, T::NewAppVolume.get());
-        if new_on {
-            let value = st.new_app_volume.unwrap_or(50) as f32 / 100.0;
-            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-            let number = Rect::from_min_max(pos2(row.right() - NUMBER_W, row.top()), row.max);
-            let track = Rect::from_min_max(row.min - vec2(7.0, 0.0), pos2(number.left() - 3.0, row.bottom()));
-            // Всегда ровная шкала: 50 — посередине (владелец, 23.10.2026).
-            let out = slider_scaled(ui, ui.id().with("newapp"), track, value, false, 0.0, false, 0.0);
-            let v = out.value.unwrap_or(value);
-            number_text(ui, number, v, false);
-            st.new_app_volume = Some(model::percent(v) as u8);
-        } else {
-            st.new_app_volume = None;
-        }
-
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::Profiles.get());
-        if st.profiles.is_empty() {
-            anvil_ui::widgets::note(ui, T::NoProfiles.get());
-        }
-        let name_of = |id: &Option<String>| -> String {
-            match id {
-                None => T::Never.get().to_string(),
-                Some(id) => snapshot
-                    .devices
-                    .iter()
-                    .find(|d| &d.id == id)
-                    .map(|d| d.name.clone())
-                    .unwrap_or_else(|| T::NotConnected.get().to_string()),
-            }
-        };
         let mut apply = None;
-        let mut remove = None;
-        for (i, p) in st.profiles.iter_mut().enumerate() {
-            anvil_ui::widgets::card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(150.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.deleting == Some(i) {
-                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Danger, None, T::Delete.get()).clicked() {
-                                remove = Some(i);
-                            }
-                            ui.label(egui::RichText::new(T::DeleteConfirm.get()).size(13.0));
-                        } else {
-                            if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get()).clicked() {
-                                self.deleting = Some(i);
-                            }
-                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Secondary, None, T::Apply.get()).clicked()
-                            {
-                                apply = Some(i);
-                            }
+        tab_bar(
+            ui,
+            &mut self.profiles_tab,
+            &[(ProfilesTab::Memory, T::TabMemory.get()), (ProfilesTab::List, T::Profiles.get())],
+        );
+        ui.add_space(6.0);
+        let tab = self.profiles_tab;
+        ui.scope(|ui| {
+            ui.set_min_height(PROFILES_BODY_H);
+            match tab {
+                ProfilesTab::Memory => {
+                    anvil_ui::widgets::switch(ui, &mut st.remember, T::RememberVolumes.get());
+                    ui.add_space(4.0);
+                    let mut new_on = st.new_app_volume.is_some();
+                    anvil_ui::widgets::switch(ui, &mut new_on, T::NewAppVolume.get());
+                    if new_on {
+                        let value = st.new_app_volume.unwrap_or(50) as f32 / 100.0;
+                        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                        let number = Rect::from_min_max(pos2(row.right() - NUMBER_W, row.top()), row.max);
+                        let track =
+                            Rect::from_min_max(row.min - vec2(7.0, 0.0), pos2(number.left() - 3.0, row.bottom()));
+                        // Всегда ровная шкала: 50 — посередине (владелец, 23.10.2026).
+                        let out = slider_scaled(ui, ui.id().with("newapp"), track, value, false, 0.0, false, 0.0);
+                        let v = out.value.unwrap_or(value);
+                        number_text(ui, number, v, false);
+                        st.new_app_volume = Some(model::percent(v) as u8);
+                    } else {
+                        st.new_app_volume = None;
+                    }
+                }
+                ProfilesTab::List => {
+                    if st.profiles.is_empty() {
+                        anvil_ui::widgets::note(ui, T::NoProfiles.get());
+                    }
+                    let name_of = |id: &Option<String>| -> String {
+                        match id {
+                            None => T::Never.get().to_string(),
+                            Some(id) => snapshot
+                                .devices
+                                .iter()
+                                .find(|d| &d.id == id)
+                                .map(|d| d.name.clone())
+                                .unwrap_or_else(|| T::NotConnected.get().to_string()),
                         }
-                    });
-                });
-                let output = if p.output.is_some() { name_of(&p.output) } else { "—".to_string() };
-                let summary = format!("{}: {} · {}: {}", T::Output.get(), output, T::Apps.get(), p.apps.len());
-                anvil_ui::widgets::note(ui, summary);
-                ui.add_space(4.0);
-                // Подпись и выбор — друг под другом: в строку по-русски не помещаются.
-                ui.label(egui::RichText::new(T::OnConnect.get()).size(13.0));
-                egui::ComboBox::from_id_salt(("onconnect", i))
-                    .selected_text(name_of(&p.on_connect))
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut p.on_connect, None, T::Never.get());
-                        for d in &snapshot.devices {
-                            ui.selectable_value(&mut p.on_connect, Some(d.id.clone()), &d.name);
-                        }
-                    });
-            });
-            ui.add_space(8.0);
-        }
-        if let Some(i) = remove {
-            st.profiles.remove(i);
-            self.deleting = None;
-        }
-        ui.add_space(4.0);
-        if anvil_ui::widgets::button(ui, anvil_ui::Kind::Primary, Some(anvil_ui::Icon::Save), T::SaveCurrent.get())
-            .clicked()
-        {
-            let name = format!("{} {}", T::ProfileName.get(), st.profiles.len() + 1);
-            st.profiles.push(crate::profiles::capture(&name, snapshot));
-        }
+                    };
+                    let mut remove = None;
+                    for (i, p) in st.profiles.iter_mut().enumerate() {
+                        anvil_ui::widgets::card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(150.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if self.deleting == Some(i) {
+                                        if anvil_ui::widgets::button(ui, anvil_ui::Kind::Danger, None, T::Delete.get())
+                                            .clicked()
+                                        {
+                                            remove = Some(i);
+                                        }
+                                        ui.label(egui::RichText::new(T::DeleteConfirm.get()).size(13.0));
+                                    } else {
+                                        if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get())
+                                            .clicked()
+                                        {
+                                            self.deleting = Some(i);
+                                        }
+                                        if anvil_ui::widgets::button(
+                                            ui,
+                                            anvil_ui::Kind::Secondary,
+                                            None,
+                                            T::Apply.get(),
+                                        )
+                                        .clicked()
+                                        {
+                                            apply = Some(i);
+                                        }
+                                    }
+                                });
+                            });
+                            let output = if p.output.is_some() { name_of(&p.output) } else { "—".to_string() };
+                            let summary =
+                                format!("{}: {} · {}: {}", T::Output.get(), output, T::Apps.get(), p.apps.len());
+                            anvil_ui::widgets::note(ui, summary);
+                            ui.add_space(4.0);
+                            // Подпись и выбор — друг под другом: в строку по-русски не помещаются.
+                            ui.label(egui::RichText::new(T::OnConnect.get()).size(13.0));
+                            egui::ComboBox::from_id_salt(("onconnect", i))
+                                .selected_text(name_of(&p.on_connect))
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut p.on_connect, None, T::Never.get());
+                                    for d in &snapshot.devices {
+                                        ui.selectable_value(&mut p.on_connect, Some(d.id.clone()), &d.name);
+                                    }
+                                });
+                        });
+                        ui.add_space(8.0);
+                    }
+                    if let Some(i) = remove {
+                        st.profiles.remove(i);
+                        self.deleting = None;
+                    }
+                    ui.add_space(4.0);
+                    if anvil_ui::widgets::button(
+                        ui,
+                        anvil_ui::Kind::Primary,
+                        Some(anvil_ui::Icon::Save),
+                        T::SaveCurrent.get(),
+                    )
+                    .clicked()
+                    {
+                        let name = format!("{} {}", T::ProfileName.get(), st.profiles.len() + 1);
+                        st.profiles.push(crate::profiles::capture(&name, snapshot));
+                    }
+                }
+            }
+        });
+
         if st != before {
             st.save();
             *self.shared.settings.lock().unwrap() = st;
@@ -1957,191 +2075,226 @@ impl Flyout {
         };
         let outputs: Vec<&Device> = outputs(snapshot);
 
-        // Потолок громкости: общий и по программам.
-        anvil_ui::widgets::section_label(ui, T::LimitSection.get());
-        let mut device_on = st.limit_device.is_some();
-        anvil_ui::widgets::switch(ui, &mut device_on, T::LimitDevice.get());
-        st.limit_device = device_on.then(|| percent_slider(ui, "limit-device", st.limit_device.unwrap_or(80), 1, 99));
-        // Ночью тише: часы и потолок на это время.
-        anvil_ui::widgets::switch(ui, &mut st.night, T::NightSwitch.get());
-        if st.night {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(T::NightFrom.get()).size(13.0));
-                time_combo(ui, "night-from", &mut st.night_from);
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(T::NightTo.get()).size(13.0));
-                time_combo(ui, "night-to", &mut st.night_to);
-            });
-            ui.label(egui::RichText::new(T::NightLimit.get()).size(13.0));
-            st.night_limit = percent_slider(ui, "night-limit", st.night_limit, 1, 99);
-        }
-        let mut drop_cap = None;
-        for (exe, cap) in st.limit_apps.iter_mut() {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(app_name(exe)).size(13.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get()).clicked() {
-                        drop_cap = Some(exe.clone());
+        tab_bar(
+            ui,
+            &mut self.rules_tab,
+            &[
+                (RulesTab::Limit, T::TabLimit.get()),
+                (RulesTab::Duck, T::DuckSection.get()),
+                (RulesTab::Apps, T::TabAppRules.get()),
+            ],
+        );
+        ui.add_space(6.0);
+        let tab = self.rules_tab;
+        ui.scope(|ui| {
+            ui.set_min_height(RULES_BODY_H);
+            match tab {
+                RulesTab::Limit => {
+                    // Потолок громкости: общий и по программам.
+                    let mut device_on = st.limit_device.is_some();
+                    anvil_ui::widgets::switch(ui, &mut device_on, T::LimitDevice.get());
+                    st.limit_device =
+                        device_on.then(|| percent_slider(ui, "limit-device", st.limit_device.unwrap_or(80), 1, 99));
+                    // Ночью тише: часы и потолок на это время.
+                    anvil_ui::widgets::switch(ui, &mut st.night, T::NightSwitch.get());
+                    if st.night {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(T::NightFrom.get()).size(13.0));
+                            time_combo(ui, "night-from", &mut st.night_from);
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new(T::NightTo.get()).size(13.0));
+                            time_combo(ui, "night-to", &mut st.night_to);
+                        });
+                        ui.label(egui::RichText::new(T::NightLimit.get()).size(13.0));
+                        st.night_limit = percent_slider(ui, "night-limit", st.night_limit, 1, 99);
                     }
-                });
-            });
-            *cap = percent_slider(ui, ("limit-app", exe.as_str()), *cap, 1, 99);
-        }
-        if let Some(e) = drop_cap {
-            st.limit_apps.remove(&e);
-        }
-        let free: Vec<&(String, String)> = running.iter().filter(|(e, _)| !st.limit_apps.contains_key(e)).collect();
-        if !free.is_empty() {
-            let mut pick = None;
-            egui::ComboBox::from_id_salt("limit-add")
-                .selected_text(T::AddApp.get())
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    for (exe, name) in &free {
-                        if ui.selectable_label(false, name).clicked() {
-                            pick = Some(exe.clone());
+                    let mut drop_cap = None;
+                    for (exe, cap) in st.limit_apps.iter_mut() {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(app_name(exe)).size(13.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get()).clicked()
+                                {
+                                    drop_cap = Some(exe.clone());
+                                }
+                            });
+                        });
+                        *cap = percent_slider(ui, ("limit-app", exe.as_str()), *cap, 1, 99);
+                    }
+                    if let Some(e) = drop_cap {
+                        st.limit_apps.remove(&e);
+                    }
+                    let free: Vec<&(String, String)> =
+                        running.iter().filter(|(e, _)| !st.limit_apps.contains_key(e)).collect();
+                    if !free.is_empty() {
+                        let mut pick = None;
+                        egui::ComboBox::from_id_salt("limit-add")
+                            .selected_text(T::AddApp.get())
+                            .width(ui.available_width())
+                            .show_ui(ui, |ui| {
+                                for (exe, name) in &free {
+                                    if ui.selectable_label(false, name).clicked() {
+                                        pick = Some(exe.clone());
+                                    }
+                                }
+                            });
+                        if let Some(e) = pick {
+                            st.limit_apps.insert(e, 80);
                         }
                     }
-                });
-            if let Some(e) = pick {
-                st.limit_apps.insert(e, 80);
-            }
-        }
-        anvil_ui::widgets::note(ui, T::LimitNote.get());
-
-        // Приглушение.
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::DuckSection.get());
-        anvil_ui::widgets::switch(ui, &mut st.duck, T::DuckSwitch.get());
-        if st.duck {
-            ui.label(egui::RichText::new(T::DuckLevel.get()).size(13.0));
-            st.duck_level = percent_slider(ui, "duck-level", st.duck_level, 5, 95);
-            ui.label(egui::RichText::new(T::DuckApps.get()).size(13.0));
-            let mut drop_app = None;
-            for exe in &st.duck_apps {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(app_name(exe)).size(13.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get()).clicked() {
-                            drop_app = Some(exe.clone());
+                    anvil_ui::widgets::note(ui, T::LimitNote.get());
+                }
+                RulesTab::Duck => {
+                    // Приглушение.
+                    anvil_ui::widgets::switch(ui, &mut st.duck, T::DuckSwitch.get());
+                    if st.duck {
+                        ui.label(egui::RichText::new(T::DuckLevel.get()).size(13.0));
+                        st.duck_level = percent_slider(ui, "duck-level", st.duck_level, 5, 95);
+                        ui.label(egui::RichText::new(T::DuckApps.get()).size(13.0));
+                        let mut drop_app = None;
+                        for exe in &st.duck_apps {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(app_name(exe)).size(13.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get())
+                                        .clicked()
+                                    {
+                                        drop_app = Some(exe.clone());
+                                    }
+                                });
+                            });
                         }
-                    });
-                });
-            }
-            if let Some(e) = drop_app {
-                st.duck_apps.remove(&e);
-            }
-            let free: Vec<&(String, String)> = running.iter().filter(|(e, _)| !st.duck_apps.contains(e)).collect();
-            if !free.is_empty() {
-                let mut pick = None;
-                egui::ComboBox::from_id_salt("duck-add")
-                    .selected_text(T::AddApp.get())
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for (exe, name) in &free {
-                            if ui.selectable_label(false, name).clicked() {
-                                pick = Some(exe.clone());
+                        if let Some(e) = drop_app {
+                            st.duck_apps.remove(&e);
+                        }
+                        let free: Vec<&(String, String)> =
+                            running.iter().filter(|(e, _)| !st.duck_apps.contains(e)).collect();
+                        if !free.is_empty() {
+                            let mut pick = None;
+                            egui::ComboBox::from_id_salt("duck-add")
+                                .selected_text(T::AddApp.get())
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for (exe, name) in &free {
+                                        if ui.selectable_label(false, name).clicked() {
+                                            pick = Some(exe.clone());
+                                        }
+                                    }
+                                });
+                            if let Some(e) = pick {
+                                st.duck_apps.insert(e);
                             }
                         }
-                    });
-                if let Some(e) = pick {
-                    st.duck_apps.insert(e);
+                        anvil_ui::widgets::note(ui, T::DuckNote.get());
+                    }
+                }
+                RulesTab::Apps => {
+                    // Правила по программам.
+                    if st.rules.is_empty() {
+                        anvil_ui::widgets::note(ui, T::NoRules.get());
+                    }
+                    let device_name = |id: &str| -> String {
+                        snapshot
+                            .devices
+                            .iter()
+                            .find(|d| d.id == id)
+                            .map(|d| d.name.clone())
+                            .unwrap_or_else(|| T::NotConnected.get().to_string())
+                    };
+                    let mut remove = None;
+                    for (i, r) in st.rules.iter_mut().enumerate() {
+                        anvil_ui::widgets::card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let shown =
+                                    if r.app.is_empty() { T::PickApp.get().to_string() } else { app_name(&r.app) };
+                                egui::ComboBox::from_id_salt(("rule-app", i))
+                                    .selected_text(shown)
+                                    .width(190.0)
+                                    .show_ui(ui, |ui| {
+                                        for (exe, name) in &running {
+                                            ui.selectable_value(&mut r.app, exe.clone(), name);
+                                        }
+                                    });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if self.deleting == Some(i) {
+                                        if anvil_ui::widgets::button(ui, anvil_ui::Kind::Danger, None, T::Delete.get())
+                                            .clicked()
+                                        {
+                                            remove = Some(i);
+                                        }
+                                        ui.label(egui::RichText::new(T::DeleteRuleConfirm.get()).size(13.0));
+                                    } else if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get())
+                                        .clicked()
+                                    {
+                                        self.deleting = Some(i);
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(T::RuleWhen.get()).size(13.0));
+                            let when_text = match &r.when {
+                                When::Running => T::WhenRunning.get().to_string(),
+                                When::WithDevice(id) => format!("{} {}", T::WhenWith.get(), device_name(id)),
+                            };
+                            egui::ComboBox::from_id_salt(("rule-when", i))
+                                .selected_text(when_text)
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut r.when, When::Running, T::WhenRunning.get());
+                                    for d in &snapshot.devices {
+                                        let text = format!("{} {}", T::WhenWith.get(), d.name);
+                                        ui.selectable_value(&mut r.when, When::WithDevice(d.id.clone()), text);
+                                    }
+                                });
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(T::RuleDevice.get()).size(13.0));
+                            let dev_text = match &r.device {
+                                DeviceAct::Keep => T::KeepDevice.get().to_string(),
+                                DeviceAct::System => T::AsSystem.get().to_string(),
+                                DeviceAct::Device(id) => device_name(id),
+                            };
+                            egui::ComboBox::from_id_salt(("rule-device", i))
+                                .selected_text(dev_text)
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut r.device, DeviceAct::Keep, T::KeepDevice.get());
+                                    ui.selectable_value(&mut r.device, DeviceAct::System, T::AsSystem.get());
+                                    for d in &outputs {
+                                        ui.selectable_value(&mut r.device, DeviceAct::Device(d.id.clone()), &d.name);
+                                    }
+                                });
+                            ui.add_space(4.0);
+                            let mut set_volume = r.volume.is_some();
+                            anvil_ui::widgets::switch(ui, &mut set_volume, T::RuleVolume.get());
+                            r.volume = set_volume
+                                .then(|| percent_slider(ui, ("rule-volume", i), r.volume.unwrap_or(100), 0, 100));
+                            let mut mute = r.muted == Some(true);
+                            anvil_ui::widgets::switch(ui, &mut mute, T::RuleMute.get());
+                            r.muted = mute.then_some(true);
+                        });
+                        ui.add_space(8.0);
+                    }
+                    if let Some(i) = remove {
+                        st.rules.remove(i);
+                        self.deleting = None;
+                    }
+                    ui.add_space(4.0);
+                    if anvil_ui::widgets::button(
+                        ui,
+                        anvil_ui::Kind::Secondary,
+                        Some(anvil_ui::Icon::Plus),
+                        T::AddRule.get(),
+                    )
+                    .clicked()
+                    {
+                        st.rules.push(AppRule {
+                            app: running.first().map(|(e, _)| e.clone()).unwrap_or_default(),
+                            ..Default::default()
+                        });
+                    }
                 }
             }
-            anvil_ui::widgets::note(ui, T::DuckNote.get());
-        }
-
-        // Правила по программам.
-        ui.add_space(10.0);
-        anvil_ui::widgets::section_label(ui, T::RulesSection.get());
-        if st.rules.is_empty() {
-            anvil_ui::widgets::note(ui, T::NoRules.get());
-        }
-        let device_name = |id: &str| -> String {
-            snapshot
-                .devices
-                .iter()
-                .find(|d| d.id == id)
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| T::NotConnected.get().to_string())
-        };
-        let mut remove = None;
-        for (i, r) in st.rules.iter_mut().enumerate() {
-            anvil_ui::widgets::card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let shown = if r.app.is_empty() { T::PickApp.get().to_string() } else { app_name(&r.app) };
-                    egui::ComboBox::from_id_salt(("rule-app", i)).selected_text(shown).width(190.0).show_ui(ui, |ui| {
-                        for (exe, name) in &running {
-                            ui.selectable_value(&mut r.app, exe.clone(), name);
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.deleting == Some(i) {
-                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Danger, None, T::Delete.get()).clicked() {
-                                remove = Some(i);
-                            }
-                            ui.label(egui::RichText::new(T::DeleteRuleConfirm.get()).size(13.0));
-                        } else if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::Trash, T::Delete.get()).clicked() {
-                            self.deleting = Some(i);
-                        }
-                    });
-                });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(T::RuleWhen.get()).size(13.0));
-                let when_text = match &r.when {
-                    When::Running => T::WhenRunning.get().to_string(),
-                    When::WithDevice(id) => format!("{} {}", T::WhenWith.get(), device_name(id)),
-                };
-                egui::ComboBox::from_id_salt(("rule-when", i))
-                    .selected_text(when_text)
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut r.when, When::Running, T::WhenRunning.get());
-                        for d in &snapshot.devices {
-                            let text = format!("{} {}", T::WhenWith.get(), d.name);
-                            ui.selectable_value(&mut r.when, When::WithDevice(d.id.clone()), text);
-                        }
-                    });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(T::RuleDevice.get()).size(13.0));
-                let dev_text = match &r.device {
-                    DeviceAct::Keep => T::KeepDevice.get().to_string(),
-                    DeviceAct::System => T::AsSystem.get().to_string(),
-                    DeviceAct::Device(id) => device_name(id),
-                };
-                egui::ComboBox::from_id_salt(("rule-device", i))
-                    .selected_text(dev_text)
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut r.device, DeviceAct::Keep, T::KeepDevice.get());
-                        ui.selectable_value(&mut r.device, DeviceAct::System, T::AsSystem.get());
-                        for d in &outputs {
-                            ui.selectable_value(&mut r.device, DeviceAct::Device(d.id.clone()), &d.name);
-                        }
-                    });
-                ui.add_space(4.0);
-                let mut set_volume = r.volume.is_some();
-                anvil_ui::widgets::switch(ui, &mut set_volume, T::RuleVolume.get());
-                r.volume = set_volume.then(|| percent_slider(ui, ("rule-volume", i), r.volume.unwrap_or(100), 0, 100));
-                let mut mute = r.muted == Some(true);
-                anvil_ui::widgets::switch(ui, &mut mute, T::RuleMute.get());
-                r.muted = mute.then_some(true);
-            });
-            ui.add_space(8.0);
-        }
-        if let Some(i) = remove {
-            st.rules.remove(i);
-            self.deleting = None;
-        }
-        ui.add_space(4.0);
-        if anvil_ui::widgets::button(ui, anvil_ui::Kind::Secondary, Some(anvil_ui::Icon::Plus), T::AddRule.get())
-            .clicked()
-        {
-            st.rules.push(AppRule {
-                app: running.first().map(|(e, _)| e.clone()).unwrap_or_default(),
-                ..Default::default()
-            });
-        }
+        });
         if st != before {
             st.save();
             *self.shared.settings.lock().unwrap() = st;
@@ -2150,11 +2303,10 @@ impl Flyout {
         }
     }
 
-    /// Одна страница в два столбца: «Окно», «Громкость», «Устройство вывода» (следующее, предыдущее,
-    /// каждое устройство), «Устройство ввода», затем программы со своими сочетаниями; внизу подсказка.
+    /// Страница «Горячие клавиши» (макет, вариант 1): вкладки «Общие» (окно, громкость, переключение устройства), «Устройства»
+    /// (карточка на устройство: «Основным», «Громче», «Тише», «Без звука» в ряд) и «Программы»; внизу короткая подсказка.
     fn hotkeys_page(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         self.capture_keys(ui);
-        ui.spacing_mut().item_spacing.y = 0.0;
         ui.horizontal(|ui| {
             if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
                 self.stop_capture();
@@ -2162,116 +2314,119 @@ impl Flyout {
             }
             ui.label(egui::RichText::new(T::Hotkeys.get()).font(anvil_ui::semibold(14.5)));
         });
+        ui.add_space(6.0);
         let settings = self.shared.settings.lock().unwrap().clone();
-        let global = |a: Action| (action_text(a), Slot::Global(a), settings.hotkeys.get(&a).copied());
-        let group = |ui: &mut Ui,
-                     me: &mut Self,
-                     title: &str,
-                     rows: Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)>| {
-            if rows.is_empty() {
-                return;
-            }
-            hotkey_group(ui, title);
-            for (name, slot, combo, kind) in rows {
-                me.hotkey_row(ui, name, slot, combo, kind);
-            }
-        };
-        let plain = |(n, s, c): (&'static str, Slot, Option<Combo>)| (n, s, c, None);
-        group(ui, self, T::GroupWindow.get(), vec![plain(global(Action::Open)), plain(global(Action::Mixer))]);
-        group(
+        let before = self.hotkeys_tab;
+        tab_bar(
             ui,
-            self,
-            T::GroupVolume.get(),
-            vec![plain(global(Action::Louder)), plain(global(Action::Quieter)), plain(global(Action::Mute))],
+            &mut self.hotkeys_tab,
+            &[
+                (HotkeyTab::General, T::TabGeneral.get()),
+                (HotkeyTab::Devices, T::TabDevices.get()),
+                (HotkeyTab::Apps, T::TabApps.get()),
+            ],
         );
-        let device_rows = |flow: Flow| -> Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)> {
-            of_flow(snapshot, flow)
-                .into_iter()
-                .map(|d| {
-                    let kind = icons::device_kind(&d.name, flow == Flow::Capture);
-                    (
-                        d.name.as_str(),
-                        Slot::Device(d.id.clone()),
-                        settings.device_hotkeys.get(&d.id).copied(),
-                        Some(kind),
-                    )
-                })
-                .collect()
-        };
-        // Сочетания устройств — под подписью «Сделать основным:», иначе непонятно, что они делают.
-        let captioned = |ui: &mut Ui,
-                         me: &mut Self,
-                         rows: Vec<(&str, Slot, Option<Combo>, Option<icons::DeviceKind>)>,
-                         text: &str| {
-            if rows.is_empty() {
-                return;
+        if self.hotkeys_tab != before {
+            // Идёт запись — отменить: поле уходит с экрана.
+            self.stop_capture();
+        }
+        ui.add_space(6.0);
+        let tab = self.hotkeys_tab;
+        ui.scope(|ui| {
+            ui.set_min_height(HK_BODY_H);
+            match tab {
+                HotkeyTab::General => {
+                    let global = |a: Action| (action_text(a), Slot::Global(a), settings.hotkeys.get(&a).copied());
+                    let groups: [(&str, Vec<Action>); 3] = [
+                        (T::GroupWindow.get(), vec![Action::Open, Action::Mixer]),
+                        (T::GroupVolume.get(), vec![Action::Louder, Action::Quieter, Action::Mute]),
+                        (T::OutputDevice.get(), vec![Action::NextOutput, Action::PrevOutput]),
+                    ];
+                    for (n, (title, actions)) in groups.into_iter().enumerate() {
+                        if n > 0 {
+                            ui.add_space(8.0);
+                        }
+                        anvil_ui::widgets::section_label(ui, title);
+                        for a in actions {
+                            let (name, slot, combo) = global(a);
+                            self.hotkey_line(ui, name, slot, combo);
+                        }
+                    }
+                }
+                HotkeyTab::Devices => {
+                    let outs = of_flow(snapshot, Flow::Render);
+                    if !outs.is_empty() {
+                        anvil_ui::widgets::section_label(ui, T::OutputDevices.get());
+                        ui.add_space(4.0);
+                    }
+                    for d in outs {
+                        let mut fields = vec![(
+                            T::MakeDefaultShort.get(),
+                            Slot::Device(d.id.clone()),
+                            settings.device_hotkeys.get(&d.id).copied(),
+                        )];
+                        for a in AppAction::ALL {
+                            fields.push((
+                                app_action_text(a),
+                                Slot::DeviceVol(a, d.id.clone()),
+                                settings.device_vol_hotkeys.get(&(a, d.id.clone())).copied(),
+                            ));
+                        }
+                        let kind = icons::device_kind(&d.name, false);
+                        self.hotkey_card(ui, CardIcon::Device(kind), &d.name, d.is_default, 4, fields);
+                    }
+                    let ins = of_flow(snapshot, Flow::Capture);
+                    if !ins.is_empty() {
+                        anvil_ui::widgets::section_label(ui, T::InputDevices.get());
+                        ui.add_space(4.0);
+                    }
+                    for d in ins {
+                        let fields = vec![(
+                            T::MakeDefaultShort.get(),
+                            Slot::Device(d.id.clone()),
+                            settings.device_hotkeys.get(&d.id).copied(),
+                        )];
+                        let kind = icons::device_kind(&d.name, true);
+                        self.hotkey_card(ui, CardIcon::Device(kind), &d.name, d.is_default, 4, fields);
+                    }
+                }
+                HotkeyTab::Apps => {
+                    // Программы: у которых уже есть сочетания, и та, чьё меню открыло страницу.
+                    let mut exes: Vec<String> = settings.app_hotkeys.keys().map(|(_, e)| e.clone()).collect();
+                    if let Some(e) = &self.focus_app {
+                        exes.push(e.clone());
+                    }
+                    exes.sort();
+                    exes.dedup();
+                    if exes.is_empty() {
+                        anvil_ui::widgets::note(ui, T::AppHotkeysHint.get());
+                    }
+                    for exe in exes {
+                        let name = snapshot
+                            .devices
+                            .iter()
+                            .flat_map(|d| d.apps.iter())
+                            .find(|a| a.key.exe == exe)
+                            .map(app_name)
+                            .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(&exe).to_string());
+                        let fields: Vec<_> = AppAction::ALL
+                            .into_iter()
+                            .map(|a| {
+                                (
+                                    app_action_text(a),
+                                    Slot::App(a, exe.clone()),
+                                    settings.app_hotkeys.get(&(a, exe.clone())).copied(),
+                                )
+                            })
+                            .collect();
+                        self.hotkey_card(ui, CardIcon::App, &name, false, 3, fields);
+                    }
+                }
             }
-            hotkey_caption(ui, text);
-            for (name, slot, combo, kind) in rows {
-                me.hotkey_row(ui, name, slot, combo, kind);
-            }
-        };
-        group(
-            ui,
-            self,
-            T::OutputDevice.get(),
-            vec![plain(global(Action::NextOutput)), plain(global(Action::PrevOutput))],
-        );
-        captioned(ui, self, device_rows(Flow::Render), T::MakeDefaultCaption.get());
-        // Громкость каждого устройства вывода — в том числе неосновного.
-        for d in of_flow(snapshot, Flow::Render) {
-            let rows: Vec<_> = AppAction::ALL
-                .into_iter()
-                .map(|a| {
-                    let combo = settings.device_vol_hotkeys.get(&(a, d.id.clone())).copied();
-                    (app_action_text(a), Slot::DeviceVol(a, d.id.clone()), combo, None)
-                })
-                .collect();
-            hotkey_caption(ui, &format!("{} · {}", T::DeviceVolumeCaption.get().trim_end_matches(':'), d.name));
-            for (name, slot, combo, kind) in rows {
-                self.hotkey_row(ui, name, slot, combo, kind);
-            }
-        }
-        let ins = device_rows(Flow::Capture);
-        if !ins.is_empty() {
-            hotkey_group(ui, T::InputDevice.get());
-            captioned(ui, self, ins, T::MakeDefaultCaption.get());
-        }
-        // Программы: у которых уже есть сочетания, и та, чьё меню открыло страницу.
-        let mut exes: Vec<String> = settings.app_hotkeys.keys().map(|(_, e)| e.clone()).collect();
-        if let Some(e) = &self.focus_app {
-            exes.push(e.clone());
-        }
-        exes.sort();
-        exes.dedup();
-        for exe in exes {
-            let name = snapshot
-                .devices
-                .iter()
-                .flat_map(|d| d.apps.iter())
-                .find(|a| a.key.exe == exe)
-                .map(app_name)
-                .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(&exe).to_string());
-            let rows = AppAction::ALL
-                .into_iter()
-                .map(|a| {
-                    (
-                        app_action_text(a),
-                        Slot::App(a, exe.clone()),
-                        settings.app_hotkeys.get(&(a, exe.clone())).copied(),
-                        None,
-                    )
-                })
-                .collect();
-            group(ui, self, &name, rows);
-        }
-        ui.add_space(8.0);
-        anvil_ui::widgets::divider(ui);
+        });
         ui.add_space(6.0);
         let p = crate::contrast::palette(ui.ctx());
-        ui.label(egui::RichText::new(T::HotkeysHint.get()).size(12.0).color(p.weak));
-        ui.add_space(3.0);
-        ui.label(egui::RichText::new(T::AppHotkeysHint.get()).size(12.0).color(p.weak));
+        ui.label(egui::RichText::new(T::HotkeysHint.get()).size(11.5).color(p.faint));
         // Пояснение к красной точке — только когда она где-то есть.
         if self.shared.hotkey_free.lock().unwrap().values().any(|free| !free) {
             ui.add_space(3.0);
@@ -2279,36 +2434,17 @@ impl Flyout {
                 let (dot, _) = ui.allocate_exact_size(vec2(7.0, 14.0), Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.5, p.danger);
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new(T::Taken.get()).size(12.0).color(p.weak));
+                ui.label(egui::RichText::new(T::Taken.get()).size(11.5).color(p.faint));
             });
         }
     }
 }
 
-/// Подпись раздела страницы сочетаний: как `section_label` набора, в строке точной высоты.
-fn hotkey_group(ui: &mut Ui, text: &str) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_GROUP), Sense::hover());
-    let p = crate::contrast::palette(ui.ctx());
-    ui.painter().text(
-        pos2(rect.left(), rect.bottom() - 9.0),
-        Align2::LEFT_CENTER,
-        text.to_uppercase(),
-        anvil_ui::semibold(11.0),
-        p.weak,
-    );
-}
-
-/// Подпись над сочетаниями устройств: «Сделать основным:» — что делает сочетание.
-fn hotkey_caption(ui: &mut Ui, text: &str) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HOTKEY_CAPTION), Sense::hover());
-    let p = crate::contrast::palette(ui.ctx());
-    ui.painter().text(
-        pos2(rect.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        FontId::proportional(11.5),
-        p.weak,
-    );
+/// Значок карточки на странице «Горячие клавиши».
+#[derive(Clone, Copy)]
+enum CardIcon {
+    Device(icons::DeviceKind),
+    App,
 }
 
 /// Время суток списком с шагом 30 минут; другое число минут из файла показывается как есть.
@@ -2373,23 +2509,17 @@ fn nav_tiles(ui: &mut Ui) -> [bool; 3] {
     clicked
 }
 
-/// Полоса вкладок «Настроек»: подпись 13, выбранная — цветом текста и чертой `accent` 2 под ней, остальные — `weak`; по низу
+/// Полоса вкладок страницы (`Настройки`, `Горячие клавиши`, `Профили`, `Правила`): подпись 13, выбранная — цветом текста и чертой `accent` 2 под ней, остальные — `weak`; по низу
 /// тонкая линия `border`.
-fn tab_bar(ui: &mut Ui, value: &mut SettingsTab) {
+fn tab_bar<V: PartialEq + Copy>(ui: &mut Ui, value: &mut V, tabs: &[(V, &str)]) {
     let p = crate::contrast::palette(ui.ctx());
     let (bar, response) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
     ui.painter().line_segment(
         [pos2(bar.left(), bar.bottom() - 0.5), pos2(bar.right(), bar.bottom() - 0.5)],
         Stroke::new(1.0, p.border),
     );
-    let tabs = [
-        (SettingsTab::Look, T::TabLook.get()),
-        (SettingsTab::Window, T::WindowSection.get()),
-        (SettingsTab::System, T::TabSystem.get()),
-        (SettingsTab::Hidden, T::Hidden.get()),
-    ];
     let mut x = bar.left();
-    for (i, (tab, text)) in tabs.into_iter().enumerate() {
+    for (i, (tab, text)) in tabs.iter().copied().enumerate() {
         let selected = *value == tab;
         let color = if selected { p.text } else { p.weak };
         let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), color);
@@ -3006,6 +3136,7 @@ impl Flyout {
         });
         if open_hotkeys {
             self.page = Page::Hotkeys;
+            self.hotkeys_tab = HotkeyTab::Apps;
             self.focus_app = Some(a.key.exe.clone());
         }
     }

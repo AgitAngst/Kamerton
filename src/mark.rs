@@ -28,6 +28,22 @@ pub const SWEEP_UP: f32 = 0.30;
 pub const SWEEP_BACK: f32 = 0.30;
 pub const SWEEP_STAGGER: f32 = 0.12;
 const SWEEP: f32 = SWEEP_DOWN + SWEEP_UP + SWEEP_BACK;
+/// «Поиграть» (щелчок по знаку в «О программе»): ручки плавно ездят туда-сюда навстречу друг другу.
+pub const PLAY_LEN: f32 = 2.2;
+pub const PLAY_CYCLES: f32 = 2.0;
+/// Размах от положения покоя (доля хода ручки).
+pub const PLAY_AMP: f32 = 0.42;
+
+/// Смещение левой ручки (правой — со знаком минус) через `u` секунд после щелчка: размах плавно нарастает и сходит на нет
+/// (`sin²`), так что ручки стартуют и встают на место без рывка.
+pub fn play_offset(u: f32) -> f32 {
+    if !(0.0..PLAY_LEN).contains(&u) {
+        return 0.0;
+    }
+    let k = u / PLAY_LEN;
+    let envelope = (std::f32::consts::PI * k).sin().powi(2);
+    PLAY_AMP * envelope * (std::f32::consts::TAU * PLAY_CYCLES * k).sin()
+}
 /// Потолок кадров трея.
 pub const TRAY_FPS: f64 = 10.0;
 
@@ -95,6 +111,7 @@ pub struct MarkScene {
     fade: Tween,
     strike_at: f64,
     sweep_at: f64,
+    play_at: f64,
     hz: f32,
     /// «О программе»: в покое знак как в файле.
     file_rest: bool,
@@ -111,6 +128,7 @@ impl MarkScene {
             fade: Tween::still(1.0),
             strike_at: LONG_AGO,
             sweep_at: LONG_AGO,
+            play_at: LONG_AGO,
             hz,
             file_rest,
         }
@@ -178,6 +196,13 @@ impl MarkScene {
             self.sweep_at = now;
         }
     }
+
+    /// Щелчок по знаку в «О программе»: ручки плавно ездят туда-сюда (`play_offset`).
+    pub fn play(&mut self, now: f64) {
+        if !self.error {
+            self.play_at = now;
+        }
+    }
 }
 
 impl Scene for MarkScene {
@@ -201,6 +226,9 @@ impl Scene for MarkScene {
                     1.0 + (*x - 1.0) * ease_out((u - SWEEP_DOWN - SWEEP_UP) / SWEEP_BACK)
                 };
             }
+            let o = play_offset((now - self.play_at) as f32);
+            v[0] = (v[0] + o).clamp(0.0, 1.0);
+            v[1] = (v[1] - o).clamp(0.0, 1.0);
             let s = (now - self.strike_at) as f32;
             if (0.0..STRIKE).contains(&s) {
                 ang = STRIKE_DEG * (-s / STRIKE_TAU).exp() * (std::f32::consts::TAU * self.hz * s).sin();
@@ -217,6 +245,7 @@ impl Scene for MarkScene {
             || self.fade.moving(now, FADE)
             || now - self.strike_at < STRIKE as f64
             || now - self.sweep_at < (SWEEP + SWEEP_STAGGER) as f64
+            || now - self.play_at < PLAY_LEN as f64
     }
 
     fn at_rest(&self, now: f64, still: bool) -> bool {
@@ -528,5 +557,34 @@ mod tests {
         let f = s.frame(2.0, false);
         assert!(f.error && f.waves == [0.0; 3] && f.cross == 0.0);
         assert!(!s.wants_frames(2.0, false));
+    }
+
+    #[test]
+    fn play_moves_the_knobs_against_each_other_and_returns() {
+        let mut s = MarkScene::new([0.5, 0.5], 7.0, true);
+        s.play(10.0);
+        let rest = s.frame(9.0, false);
+        assert_eq!((rest.l, rest.r), (0.5, 0.5));
+        let mut moved = false;
+        for i in 1..44 {
+            let f = s.frame(10.0 + i as f64 * 0.05, false);
+            if (f.l - 0.5).abs() > 0.1 {
+                moved = true;
+            }
+            // Навстречу друг другу: что одна ручка прошла вверх, то другая вниз.
+            assert!(((f.l - 0.5) + (f.r - 0.5)).abs() < 1e-5);
+        }
+        assert!(moved);
+        // Начало и конец без рывка: смещение и его скорость на краях нулевые.
+        assert_eq!(play_offset(0.0), 0.0);
+        assert!(play_offset(0.01).abs() < 1e-3 && play_offset(PLAY_LEN - 0.01).abs() < 1e-3);
+        let end = s.frame(10.0 + PLAY_LEN as f64 + 0.01, false);
+        assert_eq!((end.l, end.r), (0.5, 0.5));
+        assert!(s.wants_frames(10.5, false) && !s.wants_frames(14.0, false));
+        // Без анимации Windows и при ошибке знак стоит.
+        assert_eq!(s.frame(10.5, true).l, 0.5);
+        s.fail(11.0, true, false);
+        s.play(12.0);
+        assert!(!s.wants_frames(12.5, false));
     }
 }

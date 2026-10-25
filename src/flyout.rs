@@ -1626,10 +1626,17 @@ impl Flyout {
     /// как файл.
     fn about_mark(&mut self, ui: &mut Ui, color: IconColor) {
         let ctx = ui.ctx().clone();
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::click());
         let still = !anvil_ui::motion::Motion::of(&ctx).enabled;
         let a = &mut self.about;
         let now = a.clock.elapsed().as_secs_f64();
+        // Щелчок по знаку — ручки плавно ездят туда-сюда (без анимации Windows знак стоит).
+        if response.clicked() {
+            a.scene.play(now);
+        }
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Kamerton"));
+        anvil_ui::widgets::focus_ring(ui, rect, &response, radius::CARD);
+        response.on_hover_cursor(CursorIcon::PointingHand);
         if !a.played && ui.is_rect_visible(rect) {
             a.played = true;
             a.scene.sweep(now);

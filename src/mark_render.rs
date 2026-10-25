@@ -327,6 +327,8 @@ const WAVE_CENTER: (f32, f32) = (15.5, 16.0);
 const RADII: [f32; 3] = [5.0, 9.5, 14.0];
 const SPAN_DEG: f32 = 50.0;
 const HALF_STROKE: f32 = 1.15;
+/// Прозрачность контура волны выше текущей громкости.
+const GHOST_ALPHA: f32 = 0.22;
 /// Крестик «без звука»: два штриха, каждый растёт от своего начала.
 const CROSS: [((f32, f32), (f32, f32)); 2] = [((21.0, 12.0), (29.0, 20.0)), ((29.0, 12.0), (21.0, 20.0))];
 
@@ -385,6 +387,11 @@ pub fn speaker(f: &SpeakerFrame, size: u32, dark_taskbar: bool, color: IconColor
                     }
                     for (i, &r) in RADII.iter().enumerate() {
                         let w = f.waves[i];
+                        // Контур волны, которой сейчас нет: бледный, гаснет, когда волна появляется или идёт крест.
+                        let ghost = GHOST_ALPHA * (1.0 - w) * (1.0 - f.cross.min(1.0));
+                        if ghost > 0.001 && arc_distance(p, r) <= HALF_STROKE {
+                            clear *= 1.0 - ghost;
+                        }
                         if w > 0.001 && arc_distance(p, r * (0.82 + 0.18 * w)) <= HALF_STROKE {
                             clear *= 1.0 - w;
                         }
@@ -503,6 +510,13 @@ mod tests {
         assert_eq!(px(&img, size, 6, 16)[3], 255);
         assert_eq!(px(&img, size, 29, 16), [0xDE, 0x93, 0xCD, 255]);
         assert_eq!(px(&img, size, 0, 0)[3], 0);
+        // Волна выше громкости — бледный контур того же цвета, в обеих расцветках.
+        let quiet = SpeakerFrame { waves: [1.0, 0.0, 0.0], ..all };
+        for color in [IconColor::Purple, IconColor::Azure] {
+            let ghost = px(&speaker(&quiet, size, true, color), size, 29, 16);
+            assert!((40..=70).contains(&ghost[3]), "ghost wave alpha {}", ghost[3]);
+            assert_eq!(ghost[..3], px(&speaker(&all, size, true, color), size, 29, 16)[..3]);
+        }
         let none = SpeakerFrame { waves: [0.0; 3], cross: 1.0, ..all };
         let img = speaker(&none, size, false, IconColor::Azure);
         assert_eq!(px(&img, size, 29, 16)[3], 0, "no third wave");

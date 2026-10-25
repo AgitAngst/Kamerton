@@ -115,9 +115,11 @@ pub fn speaker(painter: &Painter, rect: Rect, color: Color32, level: f32, muted:
     } else {
         3
     };
-    for i in 0..waves {
+    for i in 0..3 {
         let r = 3.5 + i as f32 * 3.0;
         let center = p(12.0, 12.0);
+        // Волны выше текущей громкости — бледным контуром.
+        let stroke = if i < waves { stroke } else { Stroke::new(stroke.width, color.gamma_multiply(0.22)) };
         let points: Vec<Pos2> = (0..=12)
             .map(|k| {
                 let a = -0.9 + 1.8 * k as f32 / 12.0;

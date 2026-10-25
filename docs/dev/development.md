@@ -45,7 +45,7 @@ python E:/dev_personal/tools/checks.py --repo . --logs E:/dev_personal/kamerton-
 | `KAMERTON_UPDATE_DEMO=uptodate\|checking\|available\|downloading\|ready\|failed\|ratelimit` | шапка «Настроек» показывает выдуманное состояние обновления (снимки), GitHub не трогается |
 | `KAMERTON_PAGE=osd` с `KAMERTON_OSD=<проценты>[m]` | окно `--flyout` сразу плашкой громкости (`m` — «без звука»), держится час; со `KAMERTON_SNAP` — снимок плашки |
 | `KAMERTON_OSD_DEMO=1` | трей через 2 с и ещё раз через 0,8 с показывает плашку с нынешней громкостью устройства по умолчанию, ничего не меняя — живая проверка плашки |
-| `KAMERTON_SEARCH=<запрос>` | с `KAMERTON_PAGE=settings` — страница «Настройки» с запросом в поиске |
+| `KAMERTON_TAB=window\|system\|hidden` | с `KAMERTON_PAGE=settings` — вкладка «Настроек» (по умолчанию «Вид») |
 | `KAMERTON_CONTRAST=black\|white` | вид при высоком контрасте на образцах цветов (без включения темы в Windows); без неё — по настройке Windows |
 | `KAMERTON_CYCLE=N` | трей через 2 с открывает и закрывает окно N раз под плащом (невидимо) и печатает свою память в начале, после 20-го и последнего раза — прогон на утечки |
 | `KAMERTON_SNAP` с `--flyout` | на странице настроек виден и блок обновлений (проверка — только по кнопке) |

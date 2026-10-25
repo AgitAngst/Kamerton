@@ -19,7 +19,6 @@ mod mark_render;
 mod placement;
 mod profiles;
 mod rules;
-mod settings_search;
 mod shell;
 mod snap;
 mod sys;

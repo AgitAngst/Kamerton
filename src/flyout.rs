@@ -23,7 +23,6 @@ use crate::mark::{self, MarkScene};
 use crate::mark_render;
 use crate::placement::{self, Edge, Rect as PxRect};
 use crate::rules::{self, AppRule, DeviceAct, When};
-use crate::settings_search::{self, Item};
 use crate::sys;
 use crate::texts::T;
 
@@ -61,7 +60,10 @@ const HOTKEY_GROUP: f32 = 30.0;
 const HOTKEY_CAPTION: f32 = 22.0;
 /// Страница настроек: ширина переключателей «Тема» и «Язык», строка перехода на страницу.
 const SEGMENTED_W: f32 = 240.0;
-const NAV_ROW: f32 = 40.0;
+const NAV_TILE: f32 = 52.0;
+/// Вкладка «Настроек»: высота полосы вкладок и минимальная высота тела (одна на все вкладки — окно не прыгает).
+const TAB_H: f32 = 32.0;
+const TAB_BODY_H: f32 = 176.0;
 /// Кнопка «устройства ввода» внизу: микрофон и стрелка.
 const TOGGLE_W: f32 = 44.0;
 pub const EMPTY_ROW: f32 = 30.0;
@@ -399,7 +401,8 @@ pub struct Flyout {
     icon_color: Option<IconColor>,
     had_focus: bool,
     /// Запрос в поиске по «Настройкам».
-    search: String,
+    /// Вкладка страницы «Настройки» (помнится, пока программа работает).
+    settings_tab: SettingsTab,
     /// Плашка громкости: где поставлена; `None` — окно не в режиме плашки.
     osd_at: Option<OsdPlace>,
     /// Снять плащ после ближайшего `Present` — кадр плашки уже на месте.
@@ -503,10 +506,15 @@ impl Flyout {
             Ok("hotkeys") => f.page = Page::Hotkeys,
             Ok("profiles") => f.page = Page::Profiles,
             Ok("rules") => f.page = Page::Rules,
-            // `KAMERTON_SEARCH=<запрос>` — страница с запросом в поиске.
+            // `KAMERTON_TAB=window|system|hidden` — вкладка «Настроек» (по умолчанию «Вид»).
             Ok("settings") => {
                 f.page = Page::Settings;
-                f.search = std::env::var("KAMERTON_SEARCH").unwrap_or_default();
+                f.settings_tab = match std::env::var("KAMERTON_TAB").as_deref() {
+                    Ok("window") => SettingsTab::Window,
+                    Ok("system") => SettingsTab::System,
+                    Ok("hidden") => SettingsTab::Hidden,
+                    _ => SettingsTab::Look,
+                };
             }
             // Вид плашки громкости: `KAMERTON_OSD=<проценты>[m]` (m — «без звука»), держится час.
             Ok("osd") => {
@@ -563,7 +571,7 @@ impl Flyout {
             about: AboutMark::new(),
             icon_color: None,
             had_focus: false,
-            search: String::new(),
+            settings_tab: SettingsTab::Look,
             osd_at: None,
             osd_reveal: false,
         }
@@ -892,7 +900,6 @@ impl Flyout {
         self.placed.set(None);
         self.held.clear();
         self.page = Page::Mixer;
-        self.search.clear();
         self.stop_capture();
         self.reveal = false;
         self.shared.close.store(false, Ordering::SeqCst);
@@ -1021,9 +1028,7 @@ impl crate::shell::Content for Flyout {
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
         let lost = self.by_click && self.was_focused && !focused;
         let asked = self.shared.close.load(Ordering::SeqCst);
-        // Esc на «Настройках» с запросом в поиске очищает запрос, а не закрывает окно.
-        let searching = self.page == Page::Settings && !self.search.is_empty();
-        let esc = self.capture.is_none() && !searching && ctx.input(|i| i.key_pressed(Key::Escape));
+        let esc = self.capture.is_none() && ctx.input(|i| i.key_pressed(Key::Escape));
         if !warming && (lost || asked || esc) {
             self.close(ctx);
             return;
@@ -1179,6 +1184,15 @@ enum Page {
     Profiles,
     Rules,
     Settings,
+}
+
+/// Вкладки страницы «Настройки».
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Look,
+    Window,
+    System,
+    Hidden,
 }
 
 /// Поле сочетания: общее действие или действие программы.
@@ -1412,33 +1426,18 @@ impl Flyout {
         ui.horizontal(|ui| {
             if anvil_ui::widgets::icon_button(ui, anvil_ui::Icon::ArrowLeft, T::Back.get()).clicked() {
                 self.page = Page::Mixer;
-                self.search.clear();
             }
             ui.label(egui::RichText::new(T::Settings.get()).font(anvil_ui::semibold(14.5)));
         });
         ui.add_space(6.0);
         let mut st = self.shared.settings.lock().unwrap().clone();
         let before = st.clone();
-        // Шапка: знак, версия и проверка обновления. При поиске остаётся, если подходит («версия», «обновления»).
-        if settings_search::shown(&self.search, Item::About) {
-            self.about_card(ui, &mut st);
-            ui.add_space(6.0);
-        }
-        // Поиск по строкам страницы; Esc очищает запрос, а не закрывает окно (см. `ui`).
-        if !self.search.is_empty() && ui.input(|i| i.key_pressed(Key::Escape)) {
-            self.search.clear();
-        }
-        ui.add(
-            egui::TextEdit::singleline(&mut self.search)
-                .hint_text(T::SearchSettings.get())
-                .desired_width(f32::INFINITY),
-        );
-        ui.add_space(6.0);
-        let query = self.search.clone();
-        let show = |i: Item| settings_search::shown(&query, i);
+        // Шапка: знак, версия и проверка обновления — одной строкой.
+        self.about_card(ui, &mut st);
+        ui.add_space(8.0);
 
-        // Переходы на другие страницы — первыми, строками со стрелкой, а не кнопками внутри раздела.
-        let [hotkeys, profiles, rules] = nav_rows(ui, [show(Item::Hotkeys), show(Item::Profiles), show(Item::Rules)]);
+        // Переходы на другие страницы — тремя плитками в ряд.
+        let [hotkeys, profiles, rules] = nav_tiles(ui);
         if hotkeys {
             self.page = Page::Hotkeys;
         }
@@ -1448,158 +1447,118 @@ impl Flyout {
         if rules {
             self.page = Page::Rules;
         }
-        if !settings_search::any(&query, &settings_search::ALL) {
-            anvil_ui::widgets::note(ui, T::NothingFound.get());
-        }
 
-        if settings_search::any(&query, &[Item::Theme, Item::Language]) {
-            ui.add_space(10.0);
-            anvil_ui::widgets::section_label(ui, T::Appearance.get());
-        }
-        if show(Item::Theme) {
-            anvil_ui::chrome::setting_row(ui, T::Theme.get(), |ui| {
-                segmented_even(
-                    ui,
-                    &mut st.theme,
-                    &[
-                        (ThemePref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
-                        (ThemePref::Light, Some(anvil_ui::Icon::Sun), T::ThemeLight.get()),
-                        (ThemePref::Dark, Some(anvil_ui::Icon::Moon), T::ThemeDark.get()),
-                    ],
-                );
-            });
-        }
-        if show(Item::Language) {
-            anvil_ui::chrome::setting_row(ui, T::Language.get(), |ui| {
-                segmented_even(
-                    ui,
-                    &mut st.lang,
-                    &[
-                        (LangPref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
-                        (LangPref::Ru, None, "Русский"),
-                        (LangPref::En, None, "English"),
-                    ],
-                );
-            });
-        }
-
-        // Значок — свой раздел: вид в трее и цвет, который берут трей, окно микшера и «О программе».
-        if settings_search::any(&query, &[Item::TrayIcon, Item::IconColor]) {
-            ui.add_space(10.0);
-            anvil_ui::widgets::section_label(ui, T::IconSection.get());
-        }
-        if show(Item::TrayIcon) {
-            anvil_ui::chrome::setting_row(ui, T::InTray.get(), |ui| {
-                let tint = st.tray_color;
-                segmented_glyphs(
-                    ui,
-                    &mut st.tray_icon,
-                    &[
-                        (TrayIcon::Mark, Glyph::Tray(TrayIcon::Mark, tint), T::TrayMark.get()),
-                        (TrayIcon::Speaker, Glyph::Tray(TrayIcon::Speaker, tint), T::TraySpeaker.get()),
-                    ],
-                );
-            });
-        }
-        if show(Item::IconColor) {
-            anvil_ui::chrome::setting_row(ui, T::IconColor.get(), |ui| {
-                segmented_glyphs(
-                    ui,
-                    &mut st.tray_color,
-                    &[
-                        (IconColor::Purple, Glyph::Dot(IconColor::Purple), T::ColorPurple.get()),
-                        (IconColor::Azure, Glyph::Dot(IconColor::Azure), T::ColorAzure.get()),
-                    ],
-                );
-            });
-        }
-        if settings_search::any(&query, &[Item::TrayIcon, Item::IconColor]) {
-            anvil_ui::widgets::note(ui, T::IconColorNote.get());
-        }
-
-        if settings_search::any(
-            &query,
-            &[Item::Animation, Item::WheelOutside, Item::LogScale, Item::Osd, Item::MixerOnTop],
-        ) {
-            ui.add_space(10.0);
-            anvil_ui::widgets::section_label(ui, T::WindowSection.get());
-        }
-        if show(Item::Animation) {
-            anvil_ui::widgets::switch(ui, &mut st.animate, T::Animation.get());
-        }
-        if show(Item::WheelOutside) {
-            anvil_ui::widgets::switch(ui, &mut st.wheel_outside, T::WheelOutside.get());
-        }
-        if show(Item::LogScale) {
-            anvil_ui::widgets::switch(ui, &mut st.log_scale, T::LogScale.get());
-        }
-        if show(Item::Osd) {
-            anvil_ui::widgets::switch(ui, &mut st.osd, T::Osd.get());
-        }
-        if show(Item::MixerOnTop) {
-            anvil_ui::widgets::switch(ui, &mut st.mixer_on_top, T::MixerOnTop.get());
-        }
-
-        if settings_search::any(&query, &[Item::Autostart, Item::CheckUpdates, Item::Prerelease]) {
-            ui.add_space(10.0);
-            anvil_ui::widgets::section_label(ui, T::ThemeSystem.get());
-        }
-        if show(Item::Autostart) {
-            let mut auto = sys::autostart();
-            if anvil_ui::widgets::switch(ui, &mut auto, T::Autostart.get()).changed() {
-                sys::set_autostart(auto);
-            }
-        }
-        if show(Item::CheckUpdates) {
-            anvil_ui::widgets::switch(ui, &mut st.check_updates, T::CheckUpdates.get());
-        }
-        if show(Item::Prerelease) {
-            anvil_ui::widgets::switch(ui, &mut st.prerelease, T::Prerelease.get());
-        }
-
-        if show(Item::Hidden) {
-            ui.add_space(10.0);
-            anvil_ui::widgets::section_label(ui, T::Hidden.get());
-            if st.hidden_apps.is_empty() && st.hidden_devices.is_empty() {
-                anvil_ui::widgets::note(ui, T::NothingHidden.get());
-            }
-            let all = self.all.clone();
-            let mut show_app = None;
-            for exe in &st.hidden_apps {
-                let name = all
-                    .devices
-                    .iter()
-                    .flat_map(|d| d.apps.iter())
-                    .find(|a| &a.key.exe == exe)
-                    .map(app_name)
-                    .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_string());
-                anvil_ui::chrome::setting_row(ui, &name, |ui| {
-                    if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
-                        show_app = Some(exe.clone());
+        ui.add_space(10.0);
+        tab_bar(ui, &mut self.settings_tab);
+        ui.add_space(6.0);
+        // Тело вкладки не ниже самой высокой из них: окно не прыгает при смене вкладки.
+        ui.scope(|ui| {
+            ui.set_min_height(TAB_BODY_H);
+            match self.settings_tab {
+                SettingsTab::Look => {
+                    anvil_ui::chrome::setting_row(ui, T::Theme.get(), |ui| {
+                        segmented_even(
+                            ui,
+                            &mut st.theme,
+                            &[
+                                (ThemePref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
+                                (ThemePref::Light, Some(anvil_ui::Icon::Sun), T::ThemeLight.get()),
+                                (ThemePref::Dark, Some(anvil_ui::Icon::Moon), T::ThemeDark.get()),
+                            ],
+                        );
+                    });
+                    anvil_ui::chrome::setting_row(ui, T::Language.get(), |ui| {
+                        segmented_even(
+                            ui,
+                            &mut st.lang,
+                            &[
+                                (LangPref::System, Some(anvil_ui::Icon::Monitor), T::ThemeSystem.get()),
+                                (LangPref::Ru, None, "Русский"),
+                                (LangPref::En, None, "English"),
+                            ],
+                        );
+                    });
+                    // Значок трея, окна микшера и «О программе»: вид и цвет.
+                    anvil_ui::chrome::setting_row(ui, T::TrayIconRow.get(), |ui| {
+                        let tint = st.tray_color;
+                        segmented_glyphs(
+                            ui,
+                            &mut st.tray_icon,
+                            &[
+                                (TrayIcon::Mark, Glyph::Tray(TrayIcon::Mark, tint), T::TrayMark.get()),
+                                (TrayIcon::Speaker, Glyph::Tray(TrayIcon::Speaker, tint), T::TraySpeaker.get()),
+                            ],
+                        );
+                    });
+                    anvil_ui::chrome::setting_row(ui, T::IconColorRow.get(), |ui| {
+                        segmented_glyphs(
+                            ui,
+                            &mut st.tray_color,
+                            &[
+                                (IconColor::Purple, Glyph::Dot(IconColor::Purple), T::ColorPurple.get()),
+                                (IconColor::Azure, Glyph::Dot(IconColor::Azure), T::ColorAzure.get()),
+                            ],
+                        );
+                    });
+                }
+                SettingsTab::Window => {
+                    anvil_ui::widgets::switch(ui, &mut st.animate, T::Animation.get());
+                    anvil_ui::widgets::switch(ui, &mut st.wheel_outside, T::WheelOutside.get());
+                    anvil_ui::widgets::switch(ui, &mut st.log_scale, T::LogScale.get());
+                    anvil_ui::widgets::switch(ui, &mut st.osd, T::Osd.get());
+                    anvil_ui::widgets::switch(ui, &mut st.mixer_on_top, T::MixerOnTop.get());
+                }
+                SettingsTab::System => {
+                    let mut auto = sys::autostart();
+                    if anvil_ui::widgets::switch(ui, &mut auto, T::Autostart.get()).changed() {
+                        sys::set_autostart(auto);
                     }
-                });
-            }
-            let mut show_dev = None;
-            for id in &st.hidden_devices {
-                let name = all
-                    .devices
-                    .iter()
-                    .find(|d| &d.id == id)
-                    .map(|d| d.name.clone())
-                    .unwrap_or_else(|| T::NotConnected.get().to_string());
-                anvil_ui::chrome::setting_row(ui, &name, |ui| {
-                    if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
-                        show_dev = Some(id.clone());
+                    anvil_ui::widgets::switch(ui, &mut st.check_updates, T::CheckUpdates.get());
+                    anvil_ui::widgets::switch(ui, &mut st.prerelease, T::Prerelease.get());
+                }
+                SettingsTab::Hidden => {
+                    if st.hidden_apps.is_empty() && st.hidden_devices.is_empty() {
+                        anvil_ui::widgets::note(ui, T::NothingHidden.get());
                     }
-                });
+                    let all = self.all.clone();
+                    let mut show_app = None;
+                    for exe in &st.hidden_apps {
+                        let name = all
+                            .devices
+                            .iter()
+                            .flat_map(|d| d.apps.iter())
+                            .find(|a| &a.key.exe == exe)
+                            .map(app_name)
+                            .unwrap_or_else(|| exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_string());
+                        anvil_ui::chrome::setting_row(ui, &name, |ui| {
+                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
+                                show_app = Some(exe.clone());
+                            }
+                        });
+                    }
+                    let mut show_dev = None;
+                    for id in &st.hidden_devices {
+                        let name = all
+                            .devices
+                            .iter()
+                            .find(|d| &d.id == id)
+                            .map(|d| d.name.clone())
+                            .unwrap_or_else(|| T::NotConnected.get().to_string());
+                        anvil_ui::chrome::setting_row(ui, &name, |ui| {
+                            if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::Show.get()).clicked() {
+                                show_dev = Some(id.clone());
+                            }
+                        });
+                    }
+                    if let Some(e) = show_app {
+                        st.hidden_apps.remove(&e);
+                    }
+                    if let Some(d) = show_dev {
+                        st.hidden_devices.remove(&d);
+                    }
+                }
             }
-            if let Some(e) = show_app {
-                st.hidden_apps.remove(&e);
-            }
-            if let Some(d) = show_dev {
-                st.hidden_devices.remove(&d);
-            }
-        }
+        });
 
         if st != before {
             // При высоком контрасте тему задаёт система; выбор из настроек вступит в силу, когда его выключат.
@@ -1622,11 +1581,11 @@ impl Flyout {
         }
     }
 
-    /// Знак 56 в «О программе» цветом из «Настроек»: фейдеры при первом показе после открытия «Настроек», потом —
+    /// Знак (`size` px) в «О программе» цветом из «Настроек»: фейдеры при первом показе после открытия «Настроек», потом —
     /// как файл.
-    fn about_mark(&mut self, ui: &mut Ui, color: IconColor) {
+    fn about_mark(&mut self, ui: &mut Ui, color: IconColor, size: f32) {
         let ctx = ui.ctx().clone();
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::click());
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
         let still = !anvil_ui::motion::Motion::of(&ctx).enabled;
         let a = &mut self.about;
         let now = a.clock.elapsed().as_secs_f64();
@@ -1641,7 +1600,7 @@ impl Flyout {
             a.played = true;
             a.scene.sweep(now);
         }
-        let px = (56.0 * ctx.pixels_per_point()).round() as u32;
+        let px = (size * ctx.pixels_per_point()).round() as u32;
         let f = a.scene.frame(now, still);
         let key = (px, color, [(f.l * 1000.0).round() as i32, (f.r * 1000.0).round() as i32]);
         if a.shown != Some(key) {
@@ -1675,81 +1634,78 @@ impl Flyout {
         self.had_focus = focused;
     }
 
-    /// Шапка «Настроек» (вариант A макета): сверху знак, «Kamerton» и версия, ниже — полоса обновления: слева
-    /// состояние, справа кнопки по состоянию. Под версией — «Переносная копия», если это она.
+    /// Шапка «Настроек» (макет «Настройки ниже ростом», вариант 1, 25.10.2026): одна строка — знак 44, «Kamerton X.Y.Z» и
+    /// состояние обновления под названием, справа кнопки по состоянию. Ошибка и «Переносная копия» — под строкой.
     fn about_card(&mut self, ui: &mut Ui, st: &mut Settings) {
         let p = crate::contrast::palette(ui.ctx());
         let color = st.tray_color;
-        egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(radius::CARD).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 14, top: 14, bottom: 12 }).show(ui, |ui| {
+        let updater = crate::update::get();
+        let state = updater.map(crate::update::view_state);
+        egui::Frame::new()
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(radius::CARD)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                // Ширина кнопки справа по состоянию («Обновить» со значком шире «Повторить»).
+                let buttons_w = match &state {
+                    Some(anvil_update::State::Available(_)) => 150.0,
+                    Some(anvil_update::State::Ready { .. }) => 190.0,
+                    Some(anvil_update::State::Failed { .. }) => 130.0,
+                    _ => 215.0,
+                };
                 ui.horizontal(|ui| {
-                    self.about_mark(ui, color);
-                    ui.add_space(8.0);
+                    self.about_mark(ui, color, 44.0);
+                    ui.add_space(6.0);
+                    let left_w = (ui.available_width() - buttons_w).max(100.0);
                     ui.vertical(|ui| {
+                        ui.set_max_width(left_w);
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(egui::RichText::new("Kamerton").font(anvil_ui::semibold(16.0)));
-                        let version = format!("{} {}", T::Version.get(), env!("CARGO_PKG_VERSION"));
-                        ui.label(egui::RichText::new(version).size(12.5).color(p.weak));
-                        if crate::config::portable_dir().is_some() {
-                            ui.label(egui::RichText::new(T::Portable.get()).size(11.5).color(p.faint));
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.label(egui::RichText::new("Kamerton").font(anvil_ui::semibold(14.0)));
+                            ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).size(12.5).color(p.weak));
+                        });
+                        if let Some(state) = &state {
+                            Self::update_status(ui, state);
+                            // «Пропустить эту версию» — ссылкой под состоянием: рядом с «Обновить» по-русски не помещается.
+                            if let (Some(u), anvil_update::State::Available(up)) = (updater, state)
+                                && up.asset.is_some()
+                            {
+                                let link = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(T::SkipVersion.get()).size(11.5).color(p.weak).underline(),
+                                    )
+                                    .sense(Sense::click()),
+                                );
+                                if link.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                    st.skip_version = Some(up.version.to_string());
+                                    u.dismiss();
+                                }
+                            }
                         }
                     });
+                    if let (Some(u), Some(state)) = (updater, &state) {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.update_buttons(ui, u, st, state);
+                        });
+                    }
                 });
+                // Ошибка — под строкой, на всю ширину карточки: понятным текстом на языке окна, чужую длинную — обрезать.
+                if let Some(anvil_update::State::Failed { error, .. }) = &state {
+                    let ru = anvil_ui::lang::language(ui.ctx()) == anvil_ui::Lang::Ru;
+                    let mut text = anvil_update::errors::describe(error, ru);
+                    if text.chars().count() > 110 {
+                        text = text.chars().take(109).collect::<String>() + "…";
+                    }
+                    ui.add_space(4.0);
+                    ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(p.faint)).wrap());
+                }
+                if crate::config::portable_dir().is_some() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(T::Portable.get()).size(11.5).color(p.faint));
+                }
             });
-            if let Some(u) = crate::update::get() {
-                let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-                ui.painter().rect_filled(line, 0, p.border);
-                let bottom = CornerRadius { nw: 0, ne: 0, sw: radius::CARD - 1, se: radius::CARD - 1 };
-                egui::Frame::new()
-                    .fill(p.surface)
-                    .corner_radius(bottom)
-                    .inner_margin(egui::Margin::symmetric(12, 10))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.update_strip(ui, u, st);
-                    });
-            }
-        });
-    }
-
-    /// Полоса обновления: состояние слева, кнопки справа.
-    fn update_strip(&mut self, ui: &mut Ui, u: &anvil_update::Updater, st: &mut Settings) {
-        let state = crate::update::view_state(u);
-        // Справа кнопки: две («Пропустить», «Обновить») занимают больше всего, одна — меньше.
-        let buttons_w = match &state {
-            anvil_update::State::Available(_) => 225.0,
-            anvil_update::State::Ready { .. } => 190.0,
-            anvil_update::State::Failed { .. } => 130.0,
-            _ => 215.0,
-        };
-        let left_w = (ui.available_width() - buttons_w).max(100.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_max_width(left_w);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                Self::update_status(ui, &state);
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.update_buttons(ui, u, st, &state);
-            });
-        });
-        // Ошибка — под строкой, на всю ширину полосы: рядом с кнопкой («Проверить сейчас» по-русски) ей не хватает места.
-        if let anvil_update::State::Failed { error, .. } = &state {
-            let p = crate::contrast::palette(ui.ctx());
-            // Ошибка — понятным текстом на языке окна (лимит GitHub и т. п.); длинную чужую — обрезать.
-            let ru = anvil_ui::lang::language(ui.ctx()) == anvil_ui::Lang::Ru;
-            let mut text = anvil_update::errors::describe(error, ru);
-            if text.chars().count() > 110 {
-                text = text.chars().take(109).collect::<String>() + "…";
-            }
-            ui.horizontal_top(|ui| {
-                ui.add_space(22.0);
-                ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(p.faint)).wrap());
-            });
-        }
     }
 
     /// Строка состояния обновления: значок и текст; под ней ошибка или полоса загрузки.
@@ -1792,7 +1748,7 @@ impl Flyout {
         }
     }
 
-    /// Кнопки по состоянию. Колонка идёт справа налево: первой кладётся крайняя справа («Обновить», потом «Пропустить»).
+    /// Кнопки по состоянию. Колонка идёт справа налево: первой кладётся крайняя справа.
     fn update_buttons(
         &mut self,
         ui: &mut Ui,
@@ -1812,10 +1768,6 @@ impl Flyout {
                 .clicked()
                 {
                     u.install();
-                }
-                if anvil_ui::widgets::button(ui, anvil_ui::Kind::Ghost, None, T::SkipVersion.get()).clicked() {
-                    st.skip_version = Some(up.version.to_string());
-                    u.dismiss();
                 }
             }
             State::Ready { .. } => {
@@ -2380,59 +2332,87 @@ fn percent_slider(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, value
     (model::percent(v) as u8).clamp(lo, hi)
 }
 
-/// Переходы со страницы настроек: «Горячие клавиши» и «Профили» — строки со значком и стрелкой в рамке
-/// `border`, под курсором — подложка `hover`. Возвращает, по какой щёлкнули.
-fn nav_rows(ui: &mut Ui, show: [bool; 3]) -> [bool; 3] {
-    let rows = show.iter().filter(|s| **s).count();
-    if rows == 0 {
-        return [false; 3];
-    }
-    let height = rows as f32 * NAV_ROW + (rows - 1) as f32;
-    let (frame, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+/// Переходы со страницы настроек — три плитки в ряд: значок над подписью, рамка `border`, под курсором — подложка `hover`.
+/// Возвращает, по какой щёлкнули.
+fn nav_tiles(ui: &mut Ui) -> [bool; 3] {
     let p = crate::contrast::palette(ui.ctx());
-    ui.painter().rect_stroke(frame, radius::CARD, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    let gap = 8.0;
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), NAV_TILE), Sense::hover());
+    let w = (row.width() - 2.0 * gap) / 3.0;
     let mut clicked = [false; 3];
-    let mut k = 0;
     for (i, text) in [T::Hotkeys.get(), T::Profiles.get(), T::Rules.get()].into_iter().enumerate() {
-        if !show[i] {
-            continue;
-        }
-        let top = frame.top() + k as f32 * (NAV_ROW + 1.0);
-        k += 1;
-        let row = Rect::from_min_size(pos2(frame.left(), top), vec2(frame.width(), NAV_ROW)).shrink(1.0);
-        let r = ui.interact(row, ui.id().with(("nav", i)), Sense::click());
+        let tile = Rect::from_min_size(pos2(row.left() + i as f32 * (w + gap), row.top()), vec2(w, NAV_TILE));
+        let r = ui.interact(tile, ui.id().with(("nav", i)), Sense::click());
         if r.hovered() {
-            ui.painter().rect_filled(row, radius::CONTROL, p.hover);
+            ui.painter().rect_filled(tile, radius::CARD, p.hover);
         }
+        ui.painter().rect_stroke(tile, radius::CARD, Stroke::new(1.0, p.border), StrokeKind::Inside);
         let color = if r.hovered() { p.text } else { p.weak };
-        let glyph = Rect::from_center_size(pos2(row.left() + 12.0 + 8.0, row.center().y), Vec2::splat(16.0));
+        let glyph = Rect::from_center_size(pos2(tile.center().x, tile.top() + 16.0), Vec2::splat(16.0));
         match i {
             0 => icons::keyboard(ui.painter(), glyph, color),
             1 => anvil_ui::icons::paint(ui.painter(), glyph, anvil_ui::Icon::Layers, color),
             _ => icons::rules(ui.painter(), glyph, color),
         }
-        ui.painter().text(
-            pos2(glyph.right() + 10.0, row.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            FontId::proportional(14.0),
-            p.text,
+        // Подпись по центру плитки; не помещается — с «…» и подсказкой.
+        let label = Rect::from_min_max(
+            pos2(tile.left() + 2.0, tile.top() + 28.0),
+            pos2(tile.right() - 2.0, tile.bottom() - 6.0),
         );
-        let arrow = Rect::from_center_size(pos2(row.right() - 8.0 - 8.0, row.center().y), Vec2::splat(16.0));
-        anvil_ui::icons::paint(ui.painter(), arrow, anvil_ui::Icon::ArrowRight, p.weak);
-        if k < rows {
-            // Черта под строкой, если за ней есть ещё одна.
-            let y = frame.top() + k as f32 * (NAV_ROW + 1.0) - 0.5;
-            ui.painter().line_segment(
-                [pos2(frame.left() + 12.0, y), pos2(frame.right() - 12.0, y)],
-                Stroke::new(1.0, p.border),
-            );
+        let font = FontId::proportional(11.5);
+        let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), p.text).size().x;
+        if width <= label.width() {
+            ui.painter().text(label.center(), Align2::CENTER_CENTER, text, font, p.text);
+        } else {
+            text_clipped(ui, label, text, font, p.text);
         }
-        anvil_ui::widgets::focus_ring(ui, row, &r, radius::CONTROL);
+        anvil_ui::widgets::focus_ring(ui, tile, &r, radius::CARD);
         r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
         clicked[i] = r.on_hover_cursor(CursorIcon::PointingHand).clicked();
     }
     clicked
+}
+
+/// Полоса вкладок «Настроек»: подпись 13, выбранная — цветом текста и чертой `accent` 2 под ней, остальные — `weak`; по низу
+/// тонкая линия `border`.
+fn tab_bar(ui: &mut Ui, value: &mut SettingsTab) {
+    let p = crate::contrast::palette(ui.ctx());
+    let (bar, response) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
+    ui.painter().line_segment(
+        [pos2(bar.left(), bar.bottom() - 0.5), pos2(bar.right(), bar.bottom() - 0.5)],
+        Stroke::new(1.0, p.border),
+    );
+    let tabs = [
+        (SettingsTab::Look, T::TabLook.get()),
+        (SettingsTab::Window, T::WindowSection.get()),
+        (SettingsTab::System, T::TabSystem.get()),
+        (SettingsTab::Hidden, T::Hidden.get()),
+    ];
+    let mut x = bar.left();
+    for (i, (tab, text)) in tabs.into_iter().enumerate() {
+        let selected = *value == tab;
+        let color = if selected { p.text } else { p.weak };
+        let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), color);
+        let w = galley.size().x + 24.0;
+        let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, TAB_H));
+        let click = ui.interact(r, response.id.with(i), Sense::click());
+        if click.clicked() {
+            *value = tab;
+        }
+        if !selected && click.hovered() {
+            ui.painter().rect_filled(r.shrink2(vec2(0.0, 2.0)), radius::CONTROL, p.hover);
+        }
+        ui.painter().galley(pos2(r.left() + 12.0, r.center().y - galley.size().y / 2.0 - 1.0), galley, color);
+        if selected {
+            let line =
+                Rect::from_min_max(pos2(r.left() + 4.0, bar.bottom() - 2.0), pos2(r.right() - 4.0, bar.bottom()));
+            ui.painter().rect_filled(line, 1, p.accent);
+        }
+        anvil_ui::widgets::focus_ring(ui, r, &click, radius::CONTROL);
+        click.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, text));
+        click.on_hover_cursor(CursorIcon::PointingHand);
+        x += w + 2.0;
+    }
 }
 
 /// Значок в сегменте: системный значок набора, образец значка в трее (в цвете, как будет) или точка цвета.

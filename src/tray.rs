@@ -48,6 +48,8 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_WHEEL: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
 const WM_RELOAD_HOTKEYS: u32 = WM_APP + 4;
+/// Просьба из канала для Antresol (`ipc`): `wparam` — что, `lparam` — номер профиля или флаг.
+const WM_IPC: u32 = WM_APP + 5;
 const WM_TIMER: u32 = 0x0113;
 /// Таймер отложенной записи настроек (память громкости меняется часто — пишем не чаще раза в 2 с).
 const SAVE_TIMER: usize = 1;
@@ -441,6 +443,53 @@ fn start_osd_demo() {
             }
         }
     });
+}
+
+/// Просьба канала для Antresol потоку трея.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IpcAsk {
+    /// Открыть окно микшера у значка (открытое — оставить).
+    Open,
+    /// Применить профиль номер N, как из меню.
+    Profile(usize),
+    /// Включить или выключить «Ночью тише».
+    Night(bool),
+}
+
+/// Передать просьбу канала потоку трея; `false` — трей ещё не готов.
+pub fn post_ipc(ask: IpcAsk) -> bool {
+    let h = TRAY_HWND.load(Ordering::SeqCst);
+    let (what, arg) = match ask {
+        IpcAsk::Open => (0, 0),
+        IpcAsk::Profile(i) => (1, i as isize),
+        IpcAsk::Night(on) => (2, on as isize),
+    };
+    h != 0 && unsafe { PostMessageW(Some(sys::hwnd(h)), WM_IPC, WPARAM(what), LPARAM(arg)) }.is_ok()
+}
+
+/// Просьба канала в потоке трея: то же, что пункт меню или выключатель на странице «Правила».
+fn run_ipc(hwnd: HWND, what: usize, arg: isize) {
+    let ctx = CTX.get().expect("tray context");
+    match what {
+        0 => {
+            if let Some(anchor) = icon_rect(hwnd) {
+                ctx.shared.show(anchor);
+            }
+        }
+        1 => run_profile(&ctx.shared, &ctx.control, arg as usize),
+        2 => {
+            {
+                let mut st = ctx.shared.settings.lock().unwrap();
+                st.night = arg != 0;
+                st.save();
+            }
+            ctx.shared.request_repaint();
+            // Потолок — сразу, с новым ночным режимом.
+            react_to_changes(hwnd);
+        }
+        _ => {}
+    }
+    crate::ipc::notify();
 }
 
 /// Окно трея (0 — трей не запущен).
@@ -979,6 +1028,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_REFRESH => {
                 update_look(hwnd);
                 react_to_changes(hwnd);
+                crate::ipc::notify();
+                LRESULT(0)
+            }
+            WM_IPC => {
+                run_ipc(hwnd, wparam.0, lparam.0);
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == MARK_TIMER => {

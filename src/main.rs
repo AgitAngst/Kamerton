@@ -13,6 +13,7 @@ mod duck;
 mod flyout;
 mod hotkeys;
 mod icons;
+mod ipc;
 mod mark;
 mod mark_render;
 mod placement;
@@ -216,6 +217,7 @@ fn run_tray() -> Result<(), String> {
                 repaint.request_repaint();
             });
             tray::start(audio.control(), shared.clone());
+            ipc::start(audio.control(), shared.clone());
             Ok(Box::new(flyout::Flyout::in_tray(ctx, hwnd, audio, &snapshot, shared)) as Box<dyn anvil_d3d::Content>)
         }),
     )

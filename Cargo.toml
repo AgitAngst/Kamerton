@@ -12,10 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Общий вид семьи Anvil: палитра, шрифты, элементы, движение.
-anvil-ui = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.9.1" }
-anvil-update = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.9.1" }
+anvil-ui = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v1.0.0" }
+anvil-update = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v1.0.0" }
 # Окно egui на Direct3D 11 без eframe — крейт набора (с 1.3.11; раньше своя копия: src/d3d.rs, src/shell.rs).
-anvil-d3d = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.9.1" }
+anvil-d3d = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v1.0.0" }
 # eframe — только ради типов egui для набора anvil-ui; окно рисует крейт anvil-d3d (свой цикл и рисовальщик D3D11).
 eframe = "0.36.2"
 # Событие окна для медиа-клавиш (тот же winit, что у anvil-d3d).
